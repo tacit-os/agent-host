@@ -273,8 +273,7 @@ mod tests {
 
     #[test]
     fn masks_key_shapes_and_known_values() {
-        // in pieces, so the source holds nothing shaped like a key
-        let s = concat!("key sk-ant-api03-", "AAAAAAAAAAAAAAAAAAAAAAAA1234 and AIza", "SyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9876");
+        let s = "key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA1234 and AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9876";
         let r = redact(s);
         assert!(!r.contains("AAAAAAAAAAAAAAAAAAAA"), "{r}");
         assert!(r.contains("••••1234") && r.contains("••••9876"), "{r}");

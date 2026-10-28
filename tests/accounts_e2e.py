@@ -19,18 +19,17 @@ ap.add_argument("--keep", action="store_true", help="leave the scratch folder")
 ARGS = ap.parse_args()
 HOST = os.path.abspath(ARGS.host)
 
-# the values no output may carry; the "bad" ones are refused by the fake curl. In pieces, so the source holds
-# nothing shaped like a key (tools/publish-source refuses key-shaped text)
-GOOD_ANTHROPIC = "sk-ant-api03-" "GOODgoodGOODgood0123456789abcdWXYZ"
-BAD_ANTHROPIC = "sk-ant-api03-" "badBADbadBAD0123456789abcdefQRST"
-GOOD_OPENROUTER = "sk-or-v1-" "0123456789abcdef0123456789abcdefOROR"
-GOOD_OPENAI = "sk-proj-" "0123456789abcdefABCDEFopenaiKEY77"
-ROUTER_KEY_LATER = "sk-or-v1-" "fedcba9876543210fedcba9876543210LATR"
+# the values no output may carry; the "bad" ones are refused by the fake curl
+GOOD_ANTHROPIC = "sk-ant-api03-GOODgoodGOODgood0123456789abcdWXYZ"
+BAD_ANTHROPIC = "sk-ant-api03-badBADbadBAD0123456789abcdefQRST"
+GOOD_OPENROUTER = "sk-or-v1-0123456789abcdef0123456789abcdefOROR"
+GOOD_OPENAI = "sk-proj-0123456789abcdefABCDEFopenaiKEY77"
+ROUTER_KEY_LATER = "sk-or-v1-fedcba9876543210fedcba9876543210LATR"
 LATER_REFUSED = GOOD_ANTHROPIC.replace("GOOD", "Goob")
 # what a permission asks to write: key-shaped text the redactor masks for clients, at a key-shaped path
 PERM_TEXT = "Authorization: Bearer abcdefghijklmnop0123456789\nexample = sk-test-0123456789abcdefghijklmnop\n"
-PERM_FILE = "sk-learn-" "preprocessing-pipeline-notes.txt"
-HOST_ENV_LEAKS = {"OPENAI_API_KEY": "sk-proj-" "HOSTLEAKhostleak0123456789abcd", "ANTHROPIC_AUTH_TOKEN": "host-auth-token-leak-0123456789",
+PERM_FILE = "sk-learn-preprocessing-pipeline-notes.txt"
+HOST_ENV_LEAKS = {"OPENAI_API_KEY": "sk-proj-HOSTLEAKhostleak0123456789abcd", "ANTHROPIC_AUTH_TOKEN": "host-auth-token-leak-0123456789",
                   "CLAUDE_CODE_OAUTH_TOKEN": "host-oauth-token-leak-0123456789", "OPENCODE_AUTH_CONTENT": "host-opencode-auth-leak-01234",
                   "SOMETHING_API_KEY": "host-something-leak-0123456789", "CLAUDE_CONFIG_DIR": "/nonexistent/claude",
                   "CODEX_HOME": "/nonexistent/codex", "PI_CODING_AGENT_DIR": "/nonexistent/pi", "PI_CODING_AGENT_SESSION_DIR": "/nonexistent/pis"}

@@ -1,8 +1,9 @@
 //! Signing an agent account in and out, and reading its sign-in, for every client alike (plan
 //! §2.12). Each agent signs in its own way:
-//!   Claude Code  `claude auth login --claudeai|--console`. The CLI opens the browser and prints the
-//!                URL ("If the browser didn't open, visit: …"); a pasted `code#state` goes to its
-//!                stdin. Done at exit 0 after "Login successful.".
+//!   Claude Code  `claude auth login --claudeai|--console`. The CLI gives its automatic address (the
+//!                one that returns to its localhost listener) to the browser named by BROWSER, and
+//!                prints a manual page ("If the browser didn't open, visit: …") whose code a pasted
+//!                `code#state` goes to its stdin as the fallback. Done at exit 0 after "Login successful.".
 //!   Codex        a short-lived `codex app-server`: account/login/start (chatgpt or
 //!                chatgptDeviceCode), done at account/login/completed. The host opens authUrl.
 //!   pi           pi-login.mjs on pi's own SDK: JSON lines out, a pasted code in. The host opens the URL.
@@ -32,7 +33,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -43,6 +44,12 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 const HELPER: &str = include_str!("pi-login.mjs");
+// Claude Code's browser helper: the CLI runs it with the automatic sign-in address, whose return is
+// its localhost listener; it is left to the host to open, so the helper only leaves the address.
+const BROWSER_HELPER: &str = r#"#!/bin/sh
+[ -n "$AGENT_HOST_BROWSER_URL_FILE" ] || exit 0
+printf '%s\n' "$1" > "$AGENT_HOST_BROWSER_URL_FILE.tmp" && mv -f "$AGENT_HOST_BROWSER_URL_FILE.tmp" "$AGENT_HOST_BROWSER_URL_FILE"
+"#;
 const CHATGPT_PORT: u16 = 1455;
 const WAIT: Duration = Duration::from_secs(20);
 const SCRUB: [&str; 9] = ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENCODE_AUTH_CONTENT", "CLAUDE_CONFIG_DIR",
@@ -114,7 +121,9 @@ impl Login {
     }
 
     pub fn cancel(&self) {
-        self.run.end(Step::Cancelled);
+        // a sign-in the CLI already saved is done, not cancelled (Try again would start a second one)
+        let saved = self.run.settled.lock().unwrap().as_ref().and_then(|f| f());
+        self.run.end(saved.unwrap_or(Step::Cancelled));
     }
 
     /// The sign-in's process (claude, the pi helper, codex app-server, opencode serve) while it runs.
@@ -165,7 +174,7 @@ fn start_in(spec: LoginSpec, on: Box<dyn Fn(Step) + Send>, timeout: Duration, sh
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let run = Arc::new(Run { agent: spec.agent.clone(), id: NEXT.fetch_add(1, Ordering::Relaxed), ended: Mutex::new(false),
                              tx: Mutex::new(Some(tx)), procs: Mutex::new(Vec::new()), input: Mutex::new(Input::None),
-                             url: Mutex::new(String::new()) });
+                             url: Mutex::new(String::new()), settled: Mutex::new(None) });
     let busy = {
         let mut a = ACTIVE.lock().unwrap();
         let holder = match &*a {
@@ -183,7 +192,7 @@ fn start_in(spec: LoginSpec, on: Box<dyn Fn(Step) + Send>, timeout: Duration, sh
         return Ok(Login { run });
     }
     let started = match spec.agent.as_str() {
-        "claude" => claude_login(&run, &spec),
+        "claude" => claude_login(&run, &spec, share),
         "codex" => codex_login(&run, &spec),
         "pi" => pi_login(&run, &spec, share),
         _ => opencode_login(&run, &spec),
@@ -227,6 +236,7 @@ struct Run {
     procs: Mutex<Vec<Arc<Proc>>>,
     input: Mutex<Input>,
     url: Mutex<String>,  // the last Waiting's address
+    settled: Mutex<Option<Box<dyn Fn() -> Option<Step> + Send>>>,  // Claude: Done if the CLI has already saved the sign-in
 }
 
 impl Run {
@@ -540,12 +550,48 @@ fn agent_of(cmdline: &[u8]) -> &'static str {
 
 // ── Claude Code ──────────────────────────────────────────────────────────────────────────────
 
-fn claude_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
+// The helper, written to `share` when it differs from this build's (as pi-login.mjs is).
+fn browser_helper(share: &Path) -> Result<PathBuf, String> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(share).map_err(|e| format!("{}: {e}", share.display()))?;
+    let path = share.join("browser.sh");
+    if fs::read_to_string(&path).ok().as_deref() != Some(BROWSER_HELPER) {
+        let tmp = share.join(format!(".browser.sh.{}", std::process::id()));
+        fs::write(&tmp, BROWSER_HELPER).and_then(|_| fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)))
+            .and_then(|_| fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(path)
+}
+
+// The address the CLI gave the helper, when it comes within a moment: the CLI prints its manual page
+// first and asks the browser for the automatic one just after. None: the printed one is all there is.
+fn browser_url(file: &Path) -> Option<String> {
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Ok(s) = fs::read_to_string(file) {
+            let url = s.lines().next().unwrap_or("").trim().to_string();
+            if url.starts_with("http://") || url.starts_with("https://") {
+                let _ = fs::remove_file(file);
+                return Some(url);
+            }
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn claude_login(run: &Arc<Run>, spec: &LoginSpec, share: &Path) -> Result<(), String> {
     let flag = if spec.method == "console" { "--console" } else { "--claudeai" };
     let mut cmd = spec_command(spec, "claude");
     // the host opens the page (open), as for the other agents: the CLI's own xdg-open ran as its child, where the
-    // browser it started did not come up (and went with the sign-in's process group); BROWSER=true opens nothing
-    cmd.env("BROWSER", "true");
+    // browser it started did not come up (and went with the sign-in's process group). BROWSER names a helper that
+    // leaves the CLI's automatic address (the one that returns to its localhost listener) for the host to open;
+    // the manual page the CLI prints is only the fallback, for a pasted code.
+    let helper = browser_helper(share)?;
+    let capture = share.join(format!("claude-browser-{}.url", run.id));
+    let _ = fs::remove_file(&capture);
+    cmd.env("BROWSER", &helper).env("AGENT_HOST_BROWSER_URL_FILE", &capture);
     cmd.args(["auth", "login", flag]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = spawn(&mut cmd).map_err(|e| format!("start claude: {e}"))?;
     let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -554,6 +600,7 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
     let proc = run.add(child);
     let ok = Arc::new(Mutex::new(false));
     let (r, ok2, spec_open) = (run.clone(), ok.clone(), spec.clone());
+    let capture_read = capture.clone();
     let mut url_next = false;
     let orx = read_lines(out, move |line| {
         let text = plain(&line);
@@ -562,6 +609,7 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
             match url_in(after) {
                 Some(url) => {
                     url_next = false;
+                    let url = browser_url(&capture_read).unwrap_or(url);
                     let opened = open(&spec_open, &url);
                     r.step(Step::Waiting { url, opened });
                 }
@@ -581,16 +629,53 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
             e2.lock().unwrap().push(l.trim().to_string());
         }
     });
-    let (r, spec_home, spec_env) = (run.clone(), spec.home.clone(), spec.env.clone());
+    // The CLI saves the sign-in to .credentials.json, but on the automatic route it may not print "Login successful"
+    // or exit (Abdul, 2026-10-27: saved at 19:54:33, never reported). So the saved sign-in is watched for as well.
+    let before = creds_stamp(spec.home.as_deref());
+    let settle: Arc<dyn Fn() -> Option<Step> + Send + Sync> = {
+        let (home, env) = (spec.home.clone(), spec.env.clone());
+        Arc::new(move || {
+            if creds_stamp(home.as_deref()) == before {
+                return None;
+            }
+            let w = claude_status(home.as_deref(), &env).ok().filter(|w| w.state == "ready")?;
+            Some(Step::Done { email: w.email, plan: w.plan })
+        })
+    };
+    let s2 = settle.clone();
+    *run.settled.lock().unwrap() = Some(Box::new(move || s2()));
+    let (r, s3, home) = (run.clone(), settle.clone(), spec.home.clone());
+    thread::spawn(move || {
+        let mut seen = before;
+        while !*r.ended.lock().unwrap() {
+            thread::sleep(Duration::from_millis(200));
+            let now = creds_stamp(home.as_deref());
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            // let the CLI finish by itself first
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until && !*r.ended.lock().unwrap() {
+                thread::sleep(Duration::from_millis(100));
+            }
+            if let Some(done) = s3() {
+                r.end(done);
+            }
+        }
+    });
+    let (spec_home, spec_env) = (spec.home.clone(), spec.env.clone());
+    let (r, capture_end) = (run.clone(), capture);
     thread::spawn(move || {
         let st = proc.wait();
         drained(&orx);
         drained(&erx);
+        let _ = fs::remove_file(&capture_end);
         match st {
             None => {}
-            Some(s) if s.success() && *ok.lock().unwrap() => {
-                let who = claude_status(spec_home.as_deref(), &spec_env).ok();
-                r.end(Step::Done { email: who.as_ref().and_then(|w| w.email.clone()), plan: who.and_then(|w| w.plan) });
+            Some(s) if s.success() && (*ok.lock().unwrap() || settle().is_some()) => {
+                let w = claude_status(spec_home.as_deref(), &spec_env).ok();
+                r.end(Step::Done { email: w.as_ref().and_then(|w| w.email.clone()), plan: w.and_then(|w| w.plan) });
             }
             Some(s) => {
                 let errs = errs.lock().unwrap();
@@ -602,6 +687,12 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+// The saved sign-in's size and time; changes when the CLI saves a new one.
+fn creds_stamp(home: Option<&Path>) -> Option<(std::time::SystemTime, u64)> {
+    let dir = home.map(Path::to_path_buf).unwrap_or_else(|| crate::home().join(".claude"));
+    fs::metadata(dir.join(".credentials.json")).ok().and_then(|m| Some((m.modified().ok()?, m.len())))
 }
 
 fn claude_status(home: Option<&Path>, env: &[(String, String)]) -> Result<Status, String> {
@@ -1371,6 +1462,7 @@ mod tests {
     }
 
     const CLAUDE_URL: &str = "https://claude.example/oauth/authorize?code=true&state=s1";
+    const CLAUDE_AUTO_URL: &str = "https://claude.example/oauth/authorize?code=true&state=s1&redirect_uri=http%3A%2F%2Flocalhost%3A39855%2Fcallback";
 
     #[test]
     fn text_helpers() {
@@ -1428,13 +1520,23 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "ok"), &out);
         assert!(login.pid().is_some());
-        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_URL.into(), opened: true }, done(Some("someone@example.com"), Some("max"))],
+        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true }, done(Some("someone@example.com"), Some("max"))],
                    "the standing paste prompt is no step");
         assert_eq!(fs::read_to_string(out.join("claude.args")).unwrap(), "auth\nlogin\n--claudeai\n");
         assert!(fs::read_to_string(out.join("claude.env")).unwrap().lines().any(|l| l == "CLAUDE_CONFIG_DIR"));
         assert!(home.join("signed-in").exists(), "it signed in to the account's folder");
-        assert_eq!(opened(&out), [CLAUDE_URL], "the host opens the browser, once (the CLI's own is BROWSER=true)");
+        assert_eq!(opened(&out), [CLAUDE_AUTO_URL], "the host opens the CLI's automatic address, not its manual page");
         assert_eq!(active(), None);
+        assert_eq!(login.pid(), None);
+    }
+
+    #[test]
+    fn claude_browser_without_the_helper_falls_back_to_the_manual_page() {
+        let _s = serial();
+        let out = scratch("claude-manual");
+        let (login, rx) = begin(spec("claude", "browser", None, None, &out, "nobrowser"), &out);
+        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_URL.into(), opened: true }, done(Some("someone@example.com"), Some("max"))]);
+        assert_eq!(opened(&out), [CLAUDE_URL], "no automatic address: the printed manual page is opened");
         assert_eq!(login.pid(), None);
     }
 
@@ -1443,17 +1545,69 @@ mod tests {
         let _s = serial();
         let out = scratch("claude-code");
         let (login, rx) = begin(spec("claude", "console", None, None, &out, "code"), &out);
-        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_URL.into(), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true });
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the standing paste prompt is no step");
         assert_eq!(active(), Some(("claude".into(), "test-claude".into())));
         assert!(login.code("").is_err());
         login.code("not-a-code").unwrap();
-        assert_eq!(next(&rx), Step::Code { url: CLAUDE_URL.into(), message: Some("Invalid code. Please make sure the full code was copied.".into()) });
+        assert_eq!(next(&rx), Step::Code { url: CLAUDE_AUTO_URL.into(), message: Some("Invalid code. Please make sure the full code was copied.".into()) });
         login.code("abc#def").unwrap();
         assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))]);
         assert_eq!(fs::read_to_string(out.join("claude.args")).unwrap(), "auth\nlogin\n--console\n");
         assert!(!fs::read_to_string(out.join("claude.env")).unwrap().lines().any(|l| l == "CLAUDE_CONFIG_DIR"), "Personal is the agent's own folder");
         assert_eq!(login.code("abc#def"), Err("This sign-in has ended".into()));
+    }
+
+    #[test]
+    fn claude_automatic_route_is_done_when_the_sign_in_is_saved() {
+        let _s = serial();
+        let out = scratch("claude-auto");
+        let home = out.join("acct");
+        fs::create_dir_all(&home).unwrap();
+        let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "auto"), &out);
+        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true });
+        let pid = pid_in(&out, "claude.pid");
+        assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))], "the CLI printed nothing and never exited");
+        assert!(gone(pid), "the CLI is stopped");
+        assert_eq!(active(), None);
+        drop(login);
+    }
+
+    #[test]
+    fn claude_exit_0_after_a_saved_sign_in_is_done_without_the_line() {
+        let _s = serial();
+        let out = scratch("claude-silent");
+        let home = out.join("acct");
+        fs::create_dir_all(&home).unwrap();
+        let (_login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "silent"), &out);
+        assert_eq!(rest(&rx).last(), Some(&done(Some("someone@example.com"), Some("max"))));
+    }
+
+    #[test]
+    fn claude_exit_0_with_nothing_saved_is_not_done() {
+        let _s = serial();
+        let out = scratch("claude-nothing");
+        let home = out.join("acct");
+        fs::create_dir_all(&home).unwrap();
+        let (_login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "exit0"), &out);
+        assert!(matches!(rest(&rx).last(), Some(Step::Failed(_))));
+    }
+
+    #[test]
+    fn claude_cancel_after_the_sign_in_was_saved_is_done() {
+        let _s = serial();
+        let out = scratch("claude-cancel-saved");
+        let home = out.join("acct");
+        fs::create_dir_all(&home).unwrap();
+        let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "auto"), &out);
+        assert!(matches!(next(&rx), Step::Waiting { .. }));
+        let until = Instant::now() + Duration::from_secs(5);
+        while !home.join(".credentials.json").exists() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(20));
+        }
+        login.cancel();
+        assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))], "Try again's cancel finds it finished");
+        assert_eq!(active(), None);
     }
 
     #[test]

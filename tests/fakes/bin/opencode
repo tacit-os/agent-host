@@ -17,7 +17,7 @@ if args[:2] == ["auth", "list"]:
     print("│")
     print("●  OpenAI \x1b[90moauth")
     print("│")
-    print("●  sk-or-v1-" "00000000000000000000000000000000 \x1b[90mapi")
+    print("●  sk-or-v1-00000000000000000000000000000000 \x1b[90mapi")
     print("│")
     print("└  3 credentials")
     print()

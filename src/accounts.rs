@@ -539,13 +539,29 @@ fn set_status(s: &mut State, id: &str, st_: &signin::Status) {
 /// Reads an account's sign-in through its agent, at most one read per account at a time (a
 /// second waits for the first), and pushes the state.
 pub fn check(id: &str) {
+    check_in(id, false);
+}
+
+/// After a sign-in or sign-out: a read already under way began before it and may hold the old
+/// sign-in, so this one waits for it and then reads again.
+fn check_fresh(id: &str) {
+    check_in(id, true);
+}
+
+fn check_in(id: &str, fresh: bool) {
     {
         let mut s = st();
         if s.checking.contains(id) {
             while s.checking.contains(id) {
                 s = CHECKED.wait(s).unwrap();
             }
-            return;
+            if !fresh {
+                return;
+            }
+        }
+        // another fresh read may have started while this one woke: wait for that too
+        while s.checking.contains(id) {
+            s = CHECKED.wait(s).unwrap();
         }
         s.checking.insert(id.to_string());
     }
@@ -762,7 +778,7 @@ pub fn op(cid: u64, req: &Value) -> Result<Value, String> {
             let a = find(&st().file, &id).ok_or(format!("no such account: {id}"))?;
             let sp = spawn_env(&a.agent, Some(&id), true).or_else(|_| spawn_env(&a.agent, Some(&id), false))?;
             signin::logout(&a.agent, sp.home.as_deref(), req["provider"].as_str(), &sp.env)?;
-            check(&id);
+            check_fresh(&id);
             after_signin(&a.agent);
             Ok(ok)
         }
@@ -1132,7 +1148,7 @@ fn login(req: &Value) -> Result<(), String> {
         if let signin::Step::Done { .. } = step {
             let (aid, agent) = (aid.clone(), agent.clone());
             thread::spawn(move || {
-                check(&aid);
+                check_fresh(&aid);
                 first_ready(&agent);
                 after_signin(&agent);
                 refresh_catalog(&agent, &aid);
