@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stands in for curl in install.rs's tests: the install script it prints puts a claude in
+# $HOME/.local/bin. FAKE_MODE=fail: fails as curl -f does on a 404.
+[ "$FAKE_MODE" = fail ] && { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+cat <<'SCRIPT'
+echo "Setting up Claude Code..."
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\necho "9.9.9 (Claude Code)"\n' > "$HOME/.local/bin/claude"
+chmod +x "$HOME/.local/bin/claude"
+echo "Claude Code successfully installed!"
+SCRIPT

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Stands in for claude in signin.rs's tests, with the real CLI's output lines. Signed in = the file
+# signed-in in $CLAUDE_CONFIG_DIR (else $FAKE_OUT). FAKE_MODE for auth login: ok (the browser
+# finishes), code (waits for code#state on stdin), hang, fail. Notes its pid, args and env names.
+S="${CLAUDE_CONFIG_DIR:-$FAKE_OUT}/signed-in"
+case "$1 $2" in
+"--version ") echo "9.9.9 (Claude Code)"; exit 0 ;;
+"auth status")
+    if [ -f "$S" ]; then
+        echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"someone@example.com","orgId":"o","orgName":"Org","subscriptionType":"max"}'
+    else
+        echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+    fi
+    exit 0 ;;
+"auth logout") rm -f "$S"; echo "Successfully logged out from your Anthropic account."; exit 0 ;;
+"auth login") ;;
+*) exit 2 ;;
+esac
+echo $$ > "$FAKE_OUT/claude.pid"
+printf '%s\n' "$@" > "$FAKE_OUT/claude.args"
+env | cut -d= -f1 > "$FAKE_OUT/claude.env"
+U='https://claude.example/oauth/authorize?code=true&state=s1'
+printf 'Opening browser to sign in\342\200\246\n'
+printf "If the browser didn't open, visit: \033]8;;%s\a\033[94m%s\033[39m\033]8;;\a\n" "$U" "$U"
+printf 'Paste code here if prompted > '
+case "$FAKE_MODE" in
+hang) exec sleep 30 ;;
+fail) sleep 0.2; printf '\n'; echo "Login failed: Request failed with status code 403" >&2; exit 1 ;;
+code)
+    while read -r line; do
+        case "$line" in
+        *'#'*) break ;;
+        *) echo "Invalid code. Please make sure the full code was copied." >&2 ;;
+        esac
+    done ;;
+*) sleep 0.3 ;;
+esac
+touch "$S"
+printf '\nLogin successful.\n'

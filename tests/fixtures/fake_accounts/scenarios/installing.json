@@ -1,0 +1,4 @@
+{"extends": "not-installed.json",
+  "installs": [{"agent": "opencode", "steps": [{"after": 200, "step": "running", "line": "npm http fetch GET 200 https://registry.npmjs.org/opencode-ai 412ms (cache miss)"},
+                                              {"after": 2500, "step": "running", "line": "added 12 packages in 3s"},
+                                              {"after": 1200, "step": "done", "version": "1.18.31"}]}]}

@@ -1,0 +1,1059 @@
+{
+ "models": [
+  {
+   "value": "default",
+   "resolvedModel": "claude-opus-5-5",
+   "displayName": "Default (recommended)",
+   "description": "Opus 5.5 · Best for everyday, complex tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsFastMode": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "opus",
+   "resolvedModel": "claude-opus-5-5",
+   "displayName": "Opus 5.5",
+   "description": "For complex work and everyday tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsFastMode": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "fable",
+   "resolvedModel": "claude-fable-5-1",
+   "displayName": "Fable 5.1",
+   "description": "For your toughest challenges",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "sonnet",
+   "resolvedModel": "claude-sonnet-5-5",
+   "displayName": "Sonnet 5.5",
+   "description": "Most efficient for simpler tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "haiku",
+   "resolvedModel": "claude-haiku-4-5-20251001",
+   "displayName": "Haiku 4.5",
+   "description": "Fastest for quick answers"
+  },
+  {
+   "value": "claude-sonnet-5",
+   "resolvedModel": "claude-sonnet-5",
+   "displayName": "Sonnet 5",
+   "description": "Efficient for routine tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-opus-5",
+   "resolvedModel": "claude-opus-5",
+   "displayName": "Opus 5",
+   "description": "Best for everyday, complex tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsFastMode": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-fable-5",
+   "resolvedModel": "claude-fable-5",
+   "displayName": "Fable 5",
+   "description": "Most capable for your hardest and longest-running tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-opus-4-8",
+   "resolvedModel": "claude-opus-4-8",
+   "displayName": "Opus 4.8",
+   "description": "Best for everyday, complex tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsFastMode": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-opus-4-7",
+   "resolvedModel": "claude-opus-4-7",
+   "displayName": "Opus 4.7",
+   "description": "Best for everyday, complex tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-opus-4-6",
+   "resolvedModel": "claude-opus-4-6",
+   "displayName": "Opus 4.6",
+   "description": "Best for everyday, complex tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  },
+  {
+   "value": "claude-sonnet-4-6",
+   "resolvedModel": "claude-sonnet-4-6",
+   "displayName": "Sonnet 4.6",
+   "description": "Efficient for routine tasks",
+   "supportsEffort": true,
+   "supportedEffortLevels": [
+    "low",
+    "medium",
+    "high",
+    "max"
+   ],
+   "supportsAdaptiveThinking": true,
+   "supportsAutoMode": true
+  }
+ ],
+ "commands": [
+  {
+   "name": "align-grid",
+   "description": "Build editorial/magazine/report webpages on a GENUINE Müller-Brockmann modular grid (International Typographic Style) — not a decorative one. Encodes the discipline (columns + modules + baseline, grotesque type, flush-left, restrained black/white/red palette) AND the hard-won front-end engineering to make the grid real, visible, and verified: one CSS-variable source of truth, an interactive grid-toggle overlay that lives in the SAME content box as the content, subgrid \"bands\" so every element snaps to a column line, an 8px baseline lock, and runtime OPTICAL ALIGNMENT that puts display type's ink (not its box) on the line. Ships with a scaffold generator and a Puppeteer verification harness that proves 0px adherence. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "assess-impact",
+   "description": "Analyze the blast radius of a proposed change before any code is written. Maps dependents, affected stories, and test coverage. Produces specs/IMPACT_LATEST.md. Use before plan-work on any non-trivial change, when touching a shared module, or when the user asks \"what does this break?\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "audit-code",
+   "description": "Self-review checklist for the coding agent to run before dispatching a reviewer. Checks CONVENTIONS.md compliance, Boy Scout Rule, test coverage, types, and SOLID. Produces a pass/fail checklist. Use before request-review, before committing, or when user asks for a code quality check. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "audit-plan",
+   "description": "Evaluate an incoming project plan against bigpowers principles and conventions, surface gaps, and produce a READY/NOT READY verdict before engagement begins. Use when a new project arrives, when adapting a foreign plan, or before running seed-conventions on an unfamiliar codebase. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "build-epic",
+   "description": "Eight-step epic build cycle — reads state.yaml, execution-status.yaml, and one epic capsule; updates status via bp-yaml-set or direct edit. Resume mode runs one step per invocation. Use instead of ad-hoc execute-plan for release work. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "change-request",
+   "description": "Add a new requirement or reorder epics by WSJF against specs/release-plan.yaml and epic capsule directories. Modes Add and Reorder. Use when a new requirement arrives mid-release or the plan needs prioritization. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "commit-message",
+   "description": "Reviews working-tree changes, then drafts a Conventional Commits title/body and states the semantic-release version bump a single such commit would imply. Also notes which defensive-code categories were touched. Use when the user wants to commit recent work, prepare a Conventional Commits message, or asks for semantic-release / semver-consistent messaging before git commit. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "compose-workflow",
+   "description": "Chain multiple bigpowers skills into a custom workflow recipe saved in specs/. Use when a project repeats a non-standard skill sequence, or user wants a documented playbook beyond orchestrate-project modes. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "context7-mcp",
+   "description": "Fetch current library docs via Context7 MCP instead of training data. Use when user asks about frameworks, APIs, setup, or code examples for React, Next.js, Prisma, etc. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "craft-skill",
+   "description": "Create new bigpowers skills with proper structure, progressive disclosure, and bundled resources. Use when user wants to create, write, or build a new skill for the bigpowers lifecycle. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "deepen-architecture",
+   "description": "Find deepening opportunities in a codebase, informed by the domain language in specs/tech-architecture/tech-stack.md and the decisions in specs/adr/. Use when the user wants to improve architecture, find refactoring opportunities, consolidate tightly-coupled modules, or make a codebase more testable and AI-navigable. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "define-language",
+   "description": "Extract a DDD-style ubiquitous language glossary from the current conversation, flagging ambiguities and proposing canonical terms. Saves to specs/UBIQUITOUS_LANGUAGE_LATEST.md. Use when user wants to define domain terms, build a glossary, harden terminology, create a ubiquitous language, or mentions \"domain model\" or \"DDD\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "define-success",
+   "description": "TOMBSTONE — renamed/merged to plan-work. This stub resolves for one release then is removed. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "delegate-task",
+   "description": "Delegate one complex task to a single subagent, review its work in two stages before merging back. Sequential — one agent at a time, with oversight. Use when a task is complex and requires careful review before the result is accepted. Distinct from dispatch-agents (no parallelism here; reviewer sees full diff before proceeding). (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "deploy",
+   "description": "Build → verify artifact → deploy → wait → smoke deployment pipeline. Platform-agnostic (MCP or CLI), with configurable timeout, retry with exponential backoff, and integrated health-check. The deploy half of CI/CD: run after build to push to production. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "design-interface",
+   "description": "Generate multiple radically different interface designs for a module using parallel sub-agents, then compare trade-offs. Based on \"Design It Twice\" from A Philosophy of Software Design. Use when user wants to design an API, explore interface options, compare module shapes, or mentions \"design it twice\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "develop-tdd",
+   "description": "Test-driven development with red-green-refactor loop using vertical slices. Use for features (epic tasks) or bugs (specs/bugs/BUG-*.md). (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "diagnose-root",
+   "description": "Run 4-phase root cause analysis — reproduce, isolate, hypothesize, verify. Use when a bug is confirmed but root cause is unclear, after investigate-bug, or when user mentions root cause analysis. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "diagnose-stall",
+   "description": "Diagnose why agent orchestration stopped producing progress — silent stalls in /loop, dispatch-agents, or execute-plan. Use when work appears hung, no output for several minutes, or a subagent never returned. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "dispatch-agents",
+   "description": "Dispatch multiple subagents in parallel on independent tasks. No waiting between them — all run concurrently. Use when tasks are truly decoupled and speed matters. Distinct from delegate-task (concurrent here, no inter-task review gate). (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "edit-document",
+   "description": "Edit and improve documents by restructuring sections, improving clarity, and tightening prose. Use when user wants to edit, revise, restructure, or improve any document — including specs/ files, articles, READMEs, or technical writing. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "elaborate-spec",
+   "description": "Refine a rough idea into a clear, detailed specification through dialogue. Does not produce code. Use when user has a vague idea, wants to think through a feature before planning, or needs to turn \"I want X\" into a concrete spec. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "enforce-first",
+   "description": "Apply the F.I.R.S.T test quality rubric (per CONVENTIONS.md §Tests) to a test suite or individual tests. Use when develop-tdd is writing tests, when test quality needs to be checked, or when user mentions F.I.R.S.T or \"test quality\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "evolve-skill",
+   "description": "Benchmark-gated skill evolution — consume bigpowers-benchmark report, propose plan-work change, edit skill via craft-skill, re-run benchmark, record ADR. Use when a skill underperforms on benchmark or stocktake finds systemic gap. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "execute-plan",
+   "description": "Batch-execute tasks from the active epic capsule sequentially, with a human checkpoint after each step. Use when user has an approved plan and wants step-by-step oversight. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "extract-design",
+   "description": "Extract a Google DESIGN.md file from an HTML prototype (claude.ai/design or any styled page) using Puppeteer, producing machine-readable tokens and AI-generated prose. Use when the user has an HTML prototype and wants a DESIGN.md to anchor their project's visual identity, or when seed-conventions has just scaffolded a new project. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "find-way",
+   "description": "Plan a large effort as a shared map of decision tickets on an issue tracker, resolving them one at a time until the way is clear. Use when an idea is too big for one session, needs structured exploration before implementation, or requires mapping decisions before building. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "fix-bug",
+   "description": "Bug fix orchestrator — active_flow fix_bug; reads specs/bugs/BUG-*.md; chains investigate-bug, develop-tdd, validate-fix. Use when user reports a defect. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "gate-trace",
+   "description": "Deterministic traceability quality gate — reads coverage matrix + blind-spot data, applies decision rules with oracle confidence downgrade, emits PASS/CONCERNS/FAIL/WAIVED verdict. Use before release-branch to gate merges on traceability. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "generate-allure-report",
+   "description": "Generate Allure-ready reports from bigpowers YAML metadata. Reads execution-status.yaml, release-plan.yaml, epic capsules, task YAMLs, cycle-times.yaml, and bug registry to produce allure-results/junit-results.xml, categories.json, and executor.json. Use when preparing progress dashboards, integrating with Allure TestOps, or generating CI reports. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "graph-engineering",
+   "description": "Teaches an agent graph engineering — both halves. Knowledge graphs (ontology design, entity/relation/event extraction, fusion, GraphRAG/memory serving; distilled and translated from Southeast University's graduate Knowledge Graph course, npubird/KnowledgeGraphCourse, 4.4K stars) and task graphs (agent orchestration — parallel fan-out, verifier separation, the stop rule, human gates). Use when asked to build a knowledge graph, extract entities/relations from text, design an ontology, dedupe/merge entities, add graph memory or GraphRAG to an agent, orchestrate multi-agent workflows as a graph, or LEARN graph engineering — in teaching mode the agent explains each stage with worked examples and generates visual diagram artifacts. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "grill-me",
+   "description": "Interactive assumption-surfacing Q&A that stress-tests a plan through relentless questioning until every decision is resolved. Use when user wants to challenge a plan, validate decisions from conversation/context, or mentions \"grill me\". For doc-grounded variant, use grill-with-docs. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "grill-with-docs",
+   "description": "Doc-grounded variant of grill-me — stress-tests plan assumptions by fetching and citing real library or API documentation. Every challenge must cite a real URL. Use when the plan depends on a specific library or external API. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "guard-git",
+   "description": "Block dangerous git commands (push, force push, reset --hard, clean, branch -D, checkout/restore .) and enforce Conventional Commits & Branch Protection before an AI agent runs them. Installs hook scripts for Claude Code, Cursor, Cursor CLI, and Gemini CLI; documents Google Antigravity Terminal deny lists. Use when the user wants git safety hooks, to block git push or destructive git in agents, or to mirror the same policy across AI coding tools. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "harden-vps",
+   "description": "Harden a production Linux VPS for your application across three layers — application (systemd hardening, monitoring alerts, backup automation), Ubuntu OS (UFW firewall, fail2ban SSH, unattended-upgrades, SSH hardening), and VPS provider (health checks, daily backups, monthly snapshots). Use when the user wants to secure a production server, harden a VPS, audit server security, or mentions production hardening, VPS security, or harden the server. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "hook-commits",
+   "description": "Set up pre-commit hooks with lint-staged (Prettier), type checking, and tests in the current repo. Use when user wants to add pre-commit hooks, set up Husky, configure lint-staged, or add commit-time formatting/typechecking/testing. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "humanizer",
+   "description": "Rewrite AI-sounding text so it reads like the writer without changing what it says.\nUse when editing or reviewing prose for AI tells: not-X-but-Y contrasts, one-line\nclosers, staged openers, forced triads, dashes everywhere, inflated claims, sales\nlanguage, stock AI words, bold labels, or filler. Based on Wikipedia's \"Signs of AI writing.\" (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "inspect-quality",
+   "description": "Interactive QA session where user reports bugs or issues conversationally, and the agent logs them to specs/bugs/registry.yaml with a structured audit schema. Explores the codebase in the background for context and domain language. Use when user wants to report bugs, do QA, or mentions \"QA session\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "investigate-bug",
+   "description": "Investigate a bug or issue by exploring the codebase to find root cause, then write a TDD-based fix plan to specs/bugs/BUG-*.md. Use when user reports a bug, wants to investigate a problem, mentions \"triage\", or wants to plan a fix. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "kickoff-branch",
+   "description": "Create an isolated Git worktree/branch or Jujutsu workspace, then verify a clean test baseline before code. Use when starting a feature or task. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "maintain-wiki",
+   "description": "Agent-maintained OKF wiki — INGEST source docs, LINT for issues, QUERY across concept pages. Run as part of build-epic Step 8 and verify-work Phase 3. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "map-codebase",
+   "description": "Derives the tech-stack doc from scratch by scanning the codebase — analyzes stack, architecture, and gray areas (error handling, API shapes) and persists findings into specs/tech-architecture/tech-stack.md. Run when the tech doc doesn't exist yet; use survey-context to consume it once it does. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "migrate-spec",
+   "description": "Detect GSD, spec-kit, or BMAD spec artifacts and transform them into bigpowers YAML layout (state.yaml, release-plan.yaml, epics/, requirements/, plans/, ADRs). Use when migrating foreign spec docs. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "model-domain",
+   "description": "Grilling session that challenges your plan against the existing domain model, sharpens terminology, and updates specs/tech-architecture/tech-stack.md and specs/adr/ inline as decisions crystallise. Use when user wants to stress-test a plan against their project's domain language and documented decisions. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "orchestrate-project",
+   "description": "Meta-skill that enforces the 6-phase core loop (discover → elaborate → plan → build → verify → release) with hard gates. Use to coordinate multi-phase projects with guaranteed quality checkpoints. One-time command for the entire project lifecycle. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "organize-workspace",
+   "description": "Scans the active workspace for disposable artifacts—logs, caches, stale build output, and stray draft markdown—and proposes consolidation of scattered assets. Produces a reviewable list, asks for explicit confirmation before any delete or move, and optionally revises .gitignore. Use when the user says \"clean my room\", \"organize workspace\", \"workspace cleanup\", \"remove temp files\", \"organize assets\", \"gitignore\", or wants a safe tidy pass. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "plan-refactor",
+   "description": "Create a detailed refactor plan with tiny commits via user interview, then save it as specs/REFACTOR_LATEST.md. Use when user wants to plan a refactor, create a refactoring RFC, or break a refactor into safe incremental steps. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "plan-release",
+   "description": "RELEASE-INDEX BUILDER — Sequence elaborated epics into specs/release-plan.yaml with WSJF ordering and BCP baselines. NOT a planning-spine substitute: it does not scope work (scope-work) or write story tasks (plan-work). Use after elaborate-spec when the user wants a versioned release index of epics. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "plan-tests",
+   "description": "Design a risk-scaled test architecture for an epic before implementation begins. Produces prioritized scenarios, test level distribution, and fixture plans based on TEA and bigpowers principles. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "plan-work",
+   "description": "PLANNING SPINE STEP 3 of 3 — Plan the work: write detailed implementation tasks into the active epic capsule (specs/epics/eNN-slug/). Produces countable-story-format .md specs and runnable -tasks.yaml files. Use after slice-tasks (step 2). Not a substitute for scope-work (step 1) or slice-tasks (step 2). (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "publish-package",
+   "description": "Package registry publishing for npm, crates.io, PyPI, and Homebrew. Verifies prerequisites, runs the publish command, confirms success, and surfaces actionable error hints on failure. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "quick-fix",
+   "description": "Streamlined fast-path for trivial data-only fixes — no TDD, no branching ceremony. Collapses 6 skills into 2 for changes that are purely data with no logic risk. Aborts with fallback to investigate-bug if guardrails trigger. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "release-branch",
+   "description": "Make the merge/PR/keep/discard decision for a feature branch, verify coverage gates, create the PR with gh, and clean up the worktree. Use when a feature is done and ready to ship, or when user says \"release\", \"merge\", or \"open a PR\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "request-review",
+   "description": "Dispatch a fresh reviewer agent with a clean context to critique the code after audit-code passes. The reviewer has no shared state with the coding agent and gives a genuine second opinion. Use after audit-code passes, before committing, or when user wants an independent code review. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "research-first",
+   "description": "Look-before-build — search registries, repo, existing skills, and web for prior art before implementing. Appends Prior Art to the spec. Use after survey-context and before elaborate-spec, when adding dependencies, or when the task may already be solved. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "reset-baseline",
+   "description": "Restore the project to a known clean state between agent runs or experiments. Use between benchmark runs, after a failed spike, or when user wants a clean working tree. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "respond-review",
+   "description": "Act on a reviewer agent's feedback systematically — categorize findings, apply fixes, verify tests still pass. Use after request-review returns a report, or when user wants to work through code review findings. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "run-benchmark",
+   "description": "Run skill quality benchmarks from specs/benchmarks/ definitions — N-run with/without-skill delta grading, train/validation split, pass@k + benchmark.json reports. Use before and after evolve-skill to prove quality changes are improvements, not regressions. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "run-evals",
+   "description": "Eval-Driven Development — define capability and regression evals before building; code graders use verify commands, model graders use explicit rubrics; log pass@k. Use before develop-tdd on new features, or when measuring agent capability over runs. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "run-planning",
+   "description": "DISCOVER-PHASE ADVANCER — Drive the discover-phase checklist (specs/planning-status.yaml) through survey-context → scope-work → research-first → elaborate-spec → plan-release → slice-tasks. NOT a duplicate of plan-work or the planning spine; it orchestrates the pre-coding discover phase only. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "scope-work",
+   "description": "PLANNING SPINE STEP 1 of 3 — Scope the work: define what is in and out of scope and save as specs/product/SCOPE_LATEST.yaml. Use before slice-tasks or plan-release on any new initiative. Not a substitute for slice-tasks (step 2) or plan-work (step 3). (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "search-skills",
+   "description": "Find the right bigpowers skill from natural-language intent using a local lexical index over SKILL.md frontmatter. Use when unsure which skill to invoke, or at start of research-first. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "security-review",
+   "description": "AI-powered security analysis of code changes — traces data flow, detects injection, auth bypass, secrets exposure, and unsafe deserialization across files. Use when reviewing pending changes, before release-branch, during verify-work Phase 5, during build-epic Step 0 threat modeling, or when the user says \"security review\" or \"scan for vulns\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "seed-conventions",
+   "description": "Generate CLAUDE.md and CONVENTIONS.md for a brand-new project through a brief interview, and create the specs/ directory with evolved bigpowers structure (product/, tech-architecture/, verifications/, epics/archive/). Entry point for greenfield projects. Use when starting a new project from scratch, when user asks to set up AI agent conventions, or when there is no CLAUDE.md yet. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "session-state",
+   "description": "Track implementation decisions and progress in specs/state.yaml to prevent context rot. Use at the start of a session to load context, and whenever a significant decision is made or a milestone is reached. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "setup-environment",
+   "description": "Pre-install dependencies and configure tools before development work begins. Use at session start on a fresh clone, before kickoff-branch, or when user says setup environment or install deps. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "simple-english",
+   "description": "Write or rewrite technical text with the rules of ASD-STE100 Simplified Technical English so the result is clear, unambiguous, and free of AI slop. Use for documentation, READMEs, runbooks, procedures, error messages, release notes, incident reports, and API guides. Also use when the user says \"STE\", \"Simplified Technical English\", \"ASD-STE100\", \"de-slop\", \"make this readable\", \"write for non-native readers\", or asks for docs that translate well. Enforces the 53 rules of the standard (Issue 9) with a deterministic lint gate. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "simulate-agents",
+   "description": "Run Mock User and Auditor agents against a feature in fresh contexts before human review. Use after verify-work, before request-review, when user wants pre-review simulation. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "slice-tasks",
+   "description": "PLANNING SPINE STEP 2 of 3 — Slice the work: break a scoped PRD into vertical-slice stories in specs/epics/. Use after scope-work (step 1), before plan-work (step 3). Not a substitute for scope-work or plan-work. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "smoke-test",
+   "description": "Post-deploy health-check against a live URL. Validates HTTP status, response content, and critical endpoints. Runnable standalone OR as the final step of the deploy skill. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "spike-prototype",
+   "description": "Throw-away prototype for unknown problem spaces. Output is learning notes in specs/archive/spikes/SPIKE-<name>.md, not production code. Use when the domain or technology is unexplored, when estimates are impossible without experimentation, or when user says \"spike\", \"prototype\", or \"proof of concept\". (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "stocktake-skills",
+   "description": "Sequential subagent batch audit of the bigpowers skill catalog — Quick Scan (changed only) or Full (all skills). Use during sustain phase, before a major release, or when catalog drift is suspected. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "survey-context",
+   "description": "Per-task context bootstrap — reads existing specs/ and tech-architecture docs to map the current lifecycle phase and suggest the next skill. Use at the start of any task, when returning after a break, or when unsure what to do next. For deriving a tech-stack doc from scratch, use map-codebase first. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "terse-mode",
+   "description": "Fallback ultra-compressed communication mode. Cuts token usage ~75% by dropping filler, articles, and pleasantries while keeping full technical accuracy. Use ONLY when context is critically long and compressing output is necessary to continue. Not a strategy — token discipline comes from code shape (small functions, unique names, headless tests), not terser prompts. Use when user says \"caveman mode\", \"terse mode\", \"less tokens\", \"be brief\", or invokes /terse-mode. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "trace-requirement",
+   "description": "Link story IDs from specs/release-plan.yaml + epic capsule directories to the implementing code and tests. Produces specs/TRACEABILITY_LATEST.md. Use when you want to verify coverage of a release plan, audit which stories are implemented, or find \"dark\" stories with no code. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "using-bigpowers",
+   "description": "One-time bootstrap that introduces the bigpowers skills system, the PMBOK lifecycle arc, and tells you which skill to call first for your situation. Use when starting with bigpowers for the first time, when user asks \"where do I start?\", or when the skills system needs to be explained. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "validate-contracts",
+   "description": "Assert data shape consistency across system boundaries — live API responses against JSON Schema, key-set comparison across layers, data shape validation for migrations and exports. Catches silent data corruption before deploy. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "validate-fix",
+   "description": "Prove a fix works before declaring done — re-run the failing test, run the full suite, typecheck, lint, and harden against recurrence. Use after implementing a bug fix, when user says \"is this fixed?\", or before closing an investigation. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "verify-work",
+   "description": "Multi-phase UAT gate — cold-start smoke, build, typecheck, lint, tests, step-by-step manual verification, gaps-closure loop. Use after execute-plan or develop-tdd, before audit-code. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "visual-dashboard",
+   "description": "Start a browser-based dashboard that visualizes architecture, implementation plans, and project status. Persists artifacts in .bigpowers/dashboard/. Reads specs/state.yaml, release-plan.yaml, epics, and planning-status via HTTP API or opencode panel. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "wire-ci",
+   "description": "CI pipeline setup with bundled, forge-neutral templates and local validation. Detects the forge from the git remote, generates workflows for supported forges, and skips honestly for the rest. The CI equivalent of wire-observability. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "wire-observability",
+   "description": "Add structured JSON logging, observability commands, and idempotent setup scripts to a project. Use when a project needs production-readiness instrumentation, when user wants structured logging, or as a production-readiness gate at any phase of development. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "write-document",
+   "description": "Write, organize, and sync high-integrity technical documents using the BMAD methodology. Ensures every document is Bold, Minimal, Actionable, and Durable. Use when creating architectural docs, technical guides, or organizing the specs/ directory. (user)",
+   "argumentHint": ""
+  },
+  {
+   "name": "deep-research",
+   "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "design",
+   "description": "Grant or revoke Claude agent access to your Design projects",
+   "argumentHint": "consent | revoke",
+   "builtin": true
+  },
+  {
+   "name": "design-sync",
+   "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+   "argumentHint": "[<project hint, e.g. \"Acme DS\">]",
+   "builtin": true
+  },
+  {
+   "name": "dataviz",
+   "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "update-config",
+   "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "verify",
+   "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "debug",
+   "description": "Enable debug logging for this session and help diagnose issues",
+   "argumentHint": "[issue description]",
+   "builtin": true
+  },
+  {
+   "name": "code-review",
+   "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. Pass --max-findings <n> to report up to n findings, or --max-findings all for every finding. The choice stays until you pass --max-findings default. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+   "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]",
+   "aliases": [
+    "review"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "simplify",
+   "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+   "argumentHint": "[<target>]",
+   "builtin": true
+  },
+  {
+   "name": "batch",
+   "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+   "argumentHint": "<instruction>",
+   "builtin": true
+  },
+  {
+   "name": "fewer-permission-prompts",
+   "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "doctor",
+   "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+   "argumentHint": "[prompt-audit [<path>]]",
+   "aliases": [
+    "checkup"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "loop",
+   "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+   "argumentHint": "[interval] [prompt]",
+   "aliases": [
+    "proactive"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "schedule",
+   "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+   "argumentHint": "",
+   "aliases": [
+    "routines"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "claude-api",
+   "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "workflow-authoring",
+   "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "run",
+   "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "run-skill-generator",
+   "description": "Author or improve the run-<unit> skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "plugin-authoring",
+   "description": "Make a mod: a live pane, band, status line, toast or hook inside Claude Code (terminal or desktop Code tab), written as a plugin of function hooks that hot-reloads in this session. Load before writing or debugging a hooks module.",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "advisor",
+   "description": "Let Claude consult a stronger model at key moments",
+   "argumentHint": "[fable|opus|sonnet|off]",
+   "builtin": true
+  },
+  {
+   "name": "agents",
+   "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "auto-mode-setup",
+   "description": "Teach auto mode about your environment, plus optional rule tweaks",
+   "argumentHint": "[--request-id <uuid>] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 <64-hex> --apply-file <path>)",
+   "builtin": true
+  },
+  {
+   "name": "autocompact",
+   "description": "Configure the auto-compact window size",
+   "argumentHint": "[auto|<tokens>]",
+   "builtin": true
+  },
+  {
+   "name": "clear",
+   "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+   "argumentHint": "[name]",
+   "aliases": [
+    "reset",
+    "new"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "color",
+   "description": "Set the prompt bar color for this session",
+   "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+   "builtin": true
+  },
+  {
+   "name": "compact",
+   "description": "Free up context by summarizing the conversation so far",
+   "argumentHint": "<optional custom summarization instructions>",
+   "builtin": true
+  },
+  {
+   "name": "config",
+   "description": "Set a setting by key",
+   "argumentHint": "key=value",
+   "aliases": [
+    "settings"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "output-style",
+   "description": "List output styles or switch to one",
+   "argumentHint": "[style]",
+   "builtin": true
+  },
+  {
+   "name": "context",
+   "description": "Show current context usage",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "effort",
+   "description": "Set effort level for model usage",
+   "argumentHint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>",
+   "builtin": true
+  },
+  {
+   "name": "fast",
+   "description": "Toggle fast mode (Opus 5.5)",
+   "argumentHint": "[on|off]",
+   "builtin": true
+  },
+  {
+   "name": "focus",
+   "description": "Toggle focus view: just your prompt, summary, and response",
+   "argumentHint": "[on|off]",
+   "builtin": true
+  },
+  {
+   "name": "heapdump",
+   "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "init",
+   "description": "Initialize a new CLAUDE.md file with codebase documentation",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "mcp",
+   "description": "Manage MCP servers",
+   "argumentHint": "[reconnect|enable|disable [<server>|all]]",
+   "builtin": true
+  },
+  {
+   "name": "import",
+   "description": "Import config from another AI coding agent",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "model",
+   "description": "Set the AI model for Claude Code",
+   "argumentHint": "<model>",
+   "builtin": true
+  },
+  {
+   "name": "__remote-workflow",
+   "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "workflow-launch-exec",
+   "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "reload-plugins",
+   "description": "Activate pending plugin changes in the current session",
+   "argumentHint": "[--force]",
+   "builtin": true
+  },
+  {
+   "name": "reload-skills",
+   "description": "Pick up skills added or changed on disk during this session",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "rename",
+   "description": "Rename the current conversation",
+   "argumentHint": "[name]",
+   "aliases": [
+    "name"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "ultrareview",
+   "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "usage-credits",
+   "description": "Configure usage credits or request them from your admin when you hit a limit",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "extra-usage",
+   "description": "Renamed to /usage-credits",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "usage",
+   "description": "Show session cost, plan usage, and what's contributing to your limits",
+   "argumentHint": "",
+   "aliases": [
+    "cost",
+    "stats"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "insights",
+   "description": "Generate a report analyzing your Claude Code sessions",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "recap",
+   "description": "Generate a one-line session recap now",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "skill-doctor",
+   "description": "Show which loaded skills are unused and costing context",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "goal",
+   "description": "Set a goal — keep working until the condition is met",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "design-consent",
+   "description": "Grant Claude agent access to your Design projects",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "design-revoke",
+   "description": "Revoke Claude agent access to your Design projects",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "list-agents",
+   "description": "List subagents, teammates, and other Claude sessions you can message",
+   "argumentHint": "",
+   "aliases": [
+    "peers"
+   ],
+   "builtin": true
+  },
+  {
+   "name": "team-onboarding",
+   "description": "Help teammates ramp on Claude Code with a guide from your usage",
+   "argumentHint": "",
+   "builtin": true
+  },
+  {
+   "name": "built-in-browser",
+   "description": "Read this skill before the first step that uses the built-in browser, the browser pane inside the Claude desktop app (also called the in-app browser, the browser pane, Claude's browser, or \"your own browser\"), whose tools are named mcp__Claude_Browser__* when the session runs in the desktop app and mcp__remote-devices__Claude_Browser__* when a cloud session is linked to the person's computer; before those tools are turned on there may be a single enable__mcp__remote-devices__Claude_Browser tool instead. It covers the pane's persistent sign-ins, tabs and preview_start, reading pages as text, site approvals, what the pane cannot open, and what to do when it cannot be reached. It is not for Claude in Chrome (mcp__claude-in-chrome__* tools), which has its own skill, and it does not decide which browser to use. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:built-in-browser"
+   ]
+  },
+  {
+   "name": "chrome-browser",
+   "description": "Read this skill before the first step that uses Claude in Chrome, the browser extension whose tools are named mcp__claude-in-chrome__* (also called Chrome, the browser extension, or the external browser) and which acts in the person's real Chrome with their own sign-ins; before those tools are turned on there may be a single enable__mcp__claude-in-chrome tool instead. It covers loading the tools in one ToolSearch call, checking the person's open tabs and working in a new tab, site permissions, GIF recordings, console logs, dialogs to avoid, and when to stop and ask. It is not for the built-in browser (mcp__Claude_Browser__* or mcp__remote-devices__Claude_Browser__* tools), which has its own skill, and it does not decide which browser to use. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:chrome-browser"
+   ]
+  },
+  {
+   "name": "computer-use",
+   "description": "Read this skill before the first step of any request to do something in an app on the person's own computer (Notes, Finder, System Settings, any desktop app), to look at their screen, or for \"computer use\". Computer use (desktop control) lets Claude take screenshots of the person's desktop and control it with clicks, typing and scrolling through the Claude desktop app; its tools are named mcp__computer-use__* when the session runs in the desktop app and mcp__remote-devices__computer_* when a cloud session is linked to the person's computer; before computer use is turned on for a conversation there may be no such tools, only an enable__mcp__remote-devices__computer tool, which turns it on. It covers turning it on, picking the right tool, the access flow, and the safety rules for tiered apps, links and financial actions. It is not for websites, which go through Claude in Chrome or the built-in browser and their own skills. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:computer-use"
+   ]
+  },
+  {
+   "name": "anthropic-skills:deep-research",
+   "description": "Use this skill when the user's prompt requires (1) researching a topic across multiple sources, comparing options or alternatives, analyzing trends or history, understanding markets or industries, or reviewing literature or studies and (2) synthesizing that research into a comprehensive, narrative report. If you're planning to search the web or internal knowledge bases, consider using this skill. This skill coordinates research subagents, so use it only when you have a tool for spawning subagents (the Agent or Task tool); otherwise, research the question directly. (claude.ai sync)",
+   "argumentHint": ""
+  },
+  {
+   "name": "docs",
+   "description": "docs (editable docs people share and comment on; the default for any document, named as a doc or not: a document, report, proposal, resume, cover letter, letter, contract, policy, form, template, worksheet, essay, handbook, guide, how-to, cheat sheet, SOP or other writing to keep, share, collaborate on, send, submit, print or sign; a doc exports to Word, PDF, Markdown or Google Docs, so needing a file to send, attach, upload, submit or print is no reason to pick Word, and a file nobody asked for is a doc, not Word; a plan, comparison, summary or notes asked in chat stays in chat; a pasted claude.ai artifact link may be a doc: check with docs tools first; Word or another file format named, tracked changes wanted, or a .docx to change or use as a template → that format's skill): making one → if no docs-connector instructions are in context, call its `guide` (topic.instructions) first; then create the doc (headings only, no body) before any search, file read or plan, even with files attached. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:docs"
+   ]
+  },
+  {
+   "name": "docx",
+   "description": "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx) or Word templates (.dotx). Triggers include: any mention of Microsoft Word Documents, such as 'Word doc', 'word document', '.docx', '.dotx', 'microsoft doc'. Also use when extracting or reorganizing content from .docx or .dotx files, inserting or replacing images in documents, find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a deliverable as a Word or .docx file (to download, email or print), use this skill. However, if they ask for a document, page, report, memo, or notes WITHOUT naming a file format and the session offers Claude's own dedicated document or page skill or connector, use that instead, even if they will email or print it. Do NOT use for PDFs, spreadsheets, Google Docs, or coding unrelated to document generation. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:docx"
+   ]
+  },
+  {
+   "name": "google-workspace",
+   "description": "Read this before the first Google Drive, Docs, Sheets or Slides connector call whenever the task creates or changes a Google file. Use this skill whenever the user wants to create or change a Google Doc, Sheet or Slides file in their Google Drive. Triggers include: a request that names Google Docs, Sheets, Slides or Drive and asks to make, edit, format, copy or rename a file; a docs.google.com link with a request to change that file, even a one-line fix or suggested edits; and any follow-up change to a Google file from earlier in the chat, even \"change it\" or \"add a tab\". Includes helper scripts for document positions, cell ranges and slide layout. However, if the user asks for a doc, deck or spreadsheet without naming Google, or gives a Google file only as source material for something new, use Claude's own output type instead. Do NOT use for read-only questions about a Google file, or for Word, Excel, PowerPoint or PDF files. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:google-workspace"
+   ]
+  },
+  {
+   "name": "import-memory",
+   "description": "Import a memory export from another AI assistant into Claude's memory — conversationally, additively, and with the content treated as data. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:import-memory"
+   ]
+  },
+  {
+   "name": "morning",
+   "description": "Render the user's morning brief as a styled HTML artifact, or set it up as a recurring weekday task. Use only when the user explicitly asks to run, see, or set up their morning brief, or if they invoke /morning by name. A question about their day, schedule, or calendar is not by itself a request for the brief; answer it directly instead. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:morning"
+   ]
+  },
+  {
+   "name": "pdf",
+   "description": "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:pdf"
+   ]
+  },
+  {
+   "name": "pptx",
+   "description": "Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations as PowerPoint (.pptx) files; reading, parsing, or extracting text from any .pptx or .potx file (even if the extracted content will be used elsewhere, like in an email, summary, or creating a different type of slide deck); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates (.potx), layouts, speaker notes, or comments. Trigger whenever the user asks for a PowerPoint or .pptx file, or references a .pptx or .potx filename, regardless of what they plan to do with the content afterward. However, when the user asks for a deck, slides, a slide deck, or a presentation without naming a file format, default to using a dedicated slide-deck artifact type or a separate slides skill if this session offers one; otherwise, use this skill. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:pptx"
+   ]
+  },
+  {
+   "name": "skill-creator",
+   "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:skill-creator"
+   ]
+  },
+  {
+   "name": "xlsx",
+   "description": "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit, or fix an existing .xlsx, .xlsm, .xltx, .csv, or .tsv file (e.g., adding columns, computing formulas, formatting, charting, cleaning messy data); create a new spreadsheet from scratch or from other data sources; or convert between tabular file formats. Trigger especially when the user references a spreadsheet file by name or path — even casually (like \"the xlsx in my downloads\") — and wants something done to it or produced from it. Also trigger for cleaning or restructuring messy tabular data files (malformed rows, misplaced headers, junk data) into proper spreadsheets. The deliverable must be a spreadsheet file. Do NOT trigger when the primary deliverable is a Word document, HTML report, standalone Python script, database pipeline, or Google Sheets API integration, even if tabular data is involved. (claude.ai sync)",
+   "argumentHint": "",
+   "aliases": [
+    "anthropic-skills:xlsx"
+   ]
+  }
+ ]
+}

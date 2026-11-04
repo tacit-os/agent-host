@@ -1,0 +1,25 @@
+#!/bin/sh
+# Stands in for npm in install.rs's tests: `i -g --prefix P [--allow-scripts=PKG] PKG` puts the package's command in
+# P/bin; `rm -g --prefix P PKG` takes it out.
+# FAKE_MODE: ok, fail, hang. Notes its pid and args.
+echo $$ > "$FAKE_OUT/npm.pid"
+printf '%s\n' "$*" > "$FAKE_OUT/npm.args"
+P=$4
+for a in "$@"; do PKG=$a; done
+case "$PKG" in
+@openai/codex) B=codex ;;
+@earendil-works/pi-coding-agent) B=pi ;;
+@opencode/cli | opencode-ai) B=opencode ;;
+esac
+if [ "$1" = rm ]; then
+    rm -f "$P/bin/$B" && rm -rf "$P/lib/node_modules/$PKG"
+    exit 0
+fi
+case "$FAKE_MODE" in
+hang) echo "npm http fetch GET 200"; exec sleep 30 ;;
+fail) echo "npm error code E404" >&2; echo "npm error 404 Not Found - GET https://registry.npmjs.org/$PKG" >&2; exit 1 ;;
+esac
+mkdir -p "$P/bin"
+printf '#!/bin/sh\necho "%s 1.2.3"\n' "$B" > "$P/bin/$B"
+chmod +x "$P/bin/$B"
+printf 'reify: 10%%\rreify: 100%%\nadded 1 package in 1s\n'

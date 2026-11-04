@@ -1,0 +1,37 @@
+{
+  "proto": 6,
+  "features": ["accounts", "catalog", "effort"],
+  "keyring": "open",
+  "node": true,
+  "agents": {
+    "claude": {"installed": true, "version": "2.1.288", "route": "user"},
+    "codex": {"installed": true, "version": "0.159.0", "route": "system"},
+    "pi": {"installed": true, "version": "0.86.1", "route": "system"},
+    "opencode": {"installed": true, "version": "1.18.31", "route": "user"}
+  },
+  "accounts": [
+    {"id": "claude-personal", "agent": "claude", "label": "Personal", "personal": true, "default": true, "use": "plan",
+     "state": "ready", "email": "abdul@example.com", "plan": "max", "folders": []},
+    {"id": "codex-personal", "agent": "codex", "label": "Personal", "personal": true, "default": true, "use": "plan",
+     "state": "ready", "email": "abdul@example.com", "plan": "plus", "folders": ["/home/abdul/book4-edge"]},
+    {"id": "pi-personal", "agent": "pi", "label": "Personal", "personal": true, "default": true, "use": "plan",
+     "state": "ready", "providers": [{"id": "openrouter", "via": "key", "state": "ready"}], "folders": []},
+    {"id": "opencode-personal", "agent": "opencode", "label": "Personal", "personal": true, "default": true, "use": "plan",
+     "state": "ready", "providers": [{"id": "opencode", "via": "oauth", "state": "ready"}], "folders": []}
+  ],
+  "keys": [
+    {"id": "key-openrouter", "provider": "openrouter", "label": "OpenRouter key (Personal)", "last4": "a1b2",
+     "use": ["pi", "opencode"], "state": "ok"}
+  ],
+  "found": [],
+  "providers": [
+    {"id": "anthropic", "name": "Anthropic", "env": {"pi": "ANTHROPIC_API_KEY", "opencode": "ANTHROPIC_API_KEY"}},
+    {"id": "openai", "name": "OpenAI", "env": {"pi": "OPENAI_API_KEY", "opencode": "OPENAI_API_KEY"}},
+    {"id": "openrouter", "name": "OpenRouter", "env": {"pi": "OPENROUTER_API_KEY", "opencode": "OPENROUTER_API_KEY"}},
+    {"id": "google", "name": "Google", "env": {"pi": "GEMINI_API_KEY", "opencode": "GOOGLE_GENERATIVE_AI_API_KEY"}}
+  ],
+  "defaults": {
+    "everywhere": {"agent": "claude", "run": {"claude": {"model": "default", "effort": "high"}}},
+    "folders": {"/home/abdul/book4-edge": {"agent": "codex", "run": {"codex": {"account": "codex-personal", "model": "gpt-5.6-terra", "effort": "high"}}}}
+  }
+}

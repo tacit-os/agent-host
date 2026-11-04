@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stands in for claude in catalog.rs's tests: --version, or the probe's initialize answered from
+# ../claude-init.json (FAKE_MODE=silent: never answers). Notes its pid, args, env names and cwd in $FAKE_OUT.
+D=$(dirname "$0")/..
+[ "$1" = "--version" ] && { echo "9.9.9 (Claude Code)"; exit 0; }
+echo $$ > "$FAKE_OUT/claude.pid"
+printf '%s\n' "$@" > "$FAKE_OUT/claude.args"
+env | cut -d= -f1 > "$FAKE_OUT/claude.env"
+pwd > "$FAKE_OUT/claude.cwd"
+[ "$FAKE_MODE" = silent ] && exec sleep 30
+read -r line
+printf '{"type":"system","subtype":"init"}\n{"type":"control_response","response":{"subtype":"success","request_id":"catalog-init","response":'
+tr -d '\n' < "$D/claude-init.json"
+printf '}}\n'
+cat > /dev/null

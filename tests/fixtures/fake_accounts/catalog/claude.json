@@ -1,0 +1,160 @@
+{
+ "models": [
+  {
+   "id": "default",
+   "label": "Default",
+   "detail": "Opus 5.5",
+   "group": "Claude",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "high",
+   "isDefault": true,
+   "source": "offered",
+   "about": "Opus 5.5 for most work"
+  },
+  {
+   "id": "claude-opus-5-5",
+   "label": "Opus 5.5",
+   "group": "Claude",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "high",
+   "source": "offered",
+   "about": "Most capable for complex work"
+  },
+  {
+   "id": "claude-opus-5-5[1m]",
+   "label": "Opus 5.5",
+   "detail": "1M",
+   "group": "Claude",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "high",
+   "source": "offered",
+   "about": "Opus 5.5 with a 1M context"
+  },
+  {
+   "id": "claude-sonnet-5-5",
+   "label": "Sonnet 5.5",
+   "group": "Claude",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "medium",
+   "source": "offered",
+   "about": "Best for everyday tasks"
+  },
+  {
+   "id": "claude-haiku-4-5-20251001",
+   "label": "Haiku 4.5",
+   "group": "Claude",
+   "efforts": [],
+   "source": "offered",
+   "about": "Fastest for quick answers"
+  },
+  {
+   "id": "claude-fable-5-1[1m]",
+   "label": "Fable",
+   "detail": "1M",
+   "group": "Claude",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "high",
+   "source": "offered",
+   "about": "Fable 5.1 \u00b7 Most capable for your hardest and longest-running tasks"
+  },
+  {
+   "id": "claude-opus-5",
+   "label": "claude-opus-5",
+   "group": "Used here before",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "source": "used"
+  },
+  {
+   "id": "claude-opus-4-8",
+   "label": "claude-opus-4-8",
+   "group": "Used here before",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "source": "used"
+  }
+ ],
+ "commands": [
+  {
+   "name": "compact",
+   "description": "Clear the conversation but keep a summary in context",
+   "hint": "[instructions]",
+   "kind": "command"
+  },
+  {
+   "name": "context",
+   "description": "Show what is using the context window",
+   "kind": "command"
+  },
+  {
+   "name": "model",
+   "description": "Set the model",
+   "hint": "[model]",
+   "kind": "command"
+  },
+  {
+   "name": "effort",
+   "description": "Set the reasoning effort",
+   "hint": "[low|medium|high|xhigh|max]",
+   "kind": "command"
+  },
+  {
+   "name": "review",
+   "description": "Review a pull request",
+   "kind": "command"
+  },
+  {
+   "name": "simplify",
+   "description": "Review the changed code for reuse and simplification",
+   "kind": "skill"
+  },
+  {
+   "name": "code-review",
+   "description": "Review the current diff for correctness bugs",
+   "kind": "skill",
+   "aliases": [
+    "cr"
+   ]
+  }
+ ]
+}

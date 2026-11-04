@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for node in install.rs's tests.
+echo "v0.0.1"

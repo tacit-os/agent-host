@@ -1,0 +1,20 @@
+[Unit]
+Description=Claude Code sessions for the desktop (agent-host)
+# Login-scoped on purpose, unlike the session's own daemons: an agent session outlives the window
+# that started it and a logout, and the next login attaches to the same sessions over the socket.
+# So no PartOf=tacit-session.target here - stopping this at logout would end work in progress.
+OnFailure=tacit-daemon-failed@%n.service
+
+[Service]
+ExecStart=/usr/bin/agent-host
+# agents (claude, codex, opencode, pi) install themselves under ~/.local/bin, or with their own installers in
+# ~/.opencode/bin and ~/.bun/bin, or system-wide in /usr/local/bin: with only ~/.local/bin and /usr/bin those showed
+# "Not installed" and Install put a second copy in. Tacit's launchers (/usr/lib/tacit/bin) for what sessions run.
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/usr/lib/tacit/bin
+Restart=on-failure
+# Without this the 100 ms default burns systemd's five restarts in half a second, and the unit is
+# `failed` for the rest of the session before anything has had time to notice.
+RestartSec=5
+
+[Install]
+WantedBy=default.target

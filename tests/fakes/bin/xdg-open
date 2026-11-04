@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for xdg-open in signin.rs's tests: notes the address and its env names, opens nothing.
+printf '%s\n' "$1" >> "$FAKE_OUT/opened"
+env | cut -d= -f1 > "$FAKE_OUT/opened.env"

@@ -1,0 +1,3 @@
+{"extends": "base.json", "agents": {"codex": {"installed": false, "version": "", "route": "none"}},
+  "installs": [{"agent": "codex", "steps": [{"after": 200, "step": "running", "line": "added 1 package in 2s"},
+                                           {"after": 600, "step": "done", "version": "0.159.0"}]}]}

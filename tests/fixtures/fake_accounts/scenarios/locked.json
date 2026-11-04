@@ -1,0 +1,9 @@
+{"extends": "base.json", "keyring": "locked",
+  "accounts": [
+    {"id": "claude-personal", "agent": "claude", "label": "Personal", "personal": true, "default": true, "use": "plan", "state": "ready", "email": "abdul@example.com", "plan": "max", "folders": []},
+    {"id": "claude-work", "agent": "claude", "label": "Work", "personal": false, "default": false, "use": "key", "key": "key-anthropic", "state": "locked", "folders": []},
+    {"id": "codex-personal", "agent": "codex", "label": "Personal", "personal": true, "default": true, "use": "plan", "state": "ready", "email": "abdul@example.com", "plan": "plus", "folders": []},
+    {"id": "pi-personal", "agent": "pi", "label": "Personal", "personal": true, "default": true, "use": "plan", "state": "locked", "providers": [{"id": "openrouter", "via": "key", "state": "locked"}], "folders": []},
+    {"id": "opencode-personal", "agent": "opencode", "label": "Personal", "personal": true, "default": true, "use": "plan", "state": "ready", "providers": [{"id": "opencode", "via": "oauth", "state": "ready"}], "folders": []}],
+  "keys": [{"id": "key-anthropic", "provider": "anthropic", "label": "Anthropic key (Work)", "last4": "9z8y", "use": ["claude"], "state": "unchecked"},
+           {"id": "key-openrouter", "provider": "openrouter", "label": "OpenRouter key (Personal)", "last4": "a1b2", "use": ["pi", "opencode"], "state": "unchecked"}]}

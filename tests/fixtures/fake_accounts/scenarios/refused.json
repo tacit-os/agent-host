@@ -1,0 +1,3 @@
+{"extends": "not-installed.json", "patch": {"accounts": {"claude-personal": {"state": "signedOut", "email": null, "plan": null}}},
+  "replies": {"account_login": {"ev": "error", "message": "The keyring is locked."},
+              "install": {"ev": "error", "message": "npm is not on PATH."}}}

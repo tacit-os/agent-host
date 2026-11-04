@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# Stands in for `codex app-server` in signin.rs's tests: initialize, account/login/start (chatgpt,
+# chatgptDeviceCode), account/login/completed, account/read, account/logout. Signed in = the file
+# codex-signed-in in $CODEX_HOME (else $FAKE_OUT). FAKE_MODE: ok, fail, hang. FAKE_BIND: listens on
+# 127.0.0.1:1455 as the real login server does. Notes its pid and env names.
+import json, os, socket, sys, threading
+out = os.environ.get("FAKE_OUT", "")
+mode = os.environ.get("FAKE_MODE", "ok")
+state = os.path.join(os.environ.get("CODEX_HOME") or out, "codex-signed-in")
+if sys.argv[1:] == ["--version"]:
+    print("codex-cli 0.0.1")
+    sys.exit(0)
+if sys.argv[1:2] != ["app-server"]:
+    sys.exit(2)
+if out:
+    open(os.path.join(out, "codex.pid"), "w").write(str(os.getpid()))
+    open(os.path.join(out, "codex.env"), "w").write("\n".join(os.environ) + "\n")
+if os.environ.get("FAKE_BIND"):
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 1455))
+    sock.listen()
+lock = threading.Lock()
+def send(o):
+    with lock:
+        sys.stdout.write(json.dumps(o) + "\n")
+        sys.stdout.flush()
+def complete():
+    if mode == "ok":
+        open(state, "w").close()
+        send({"method": "account/login/completed", "params": {"loginId": "L1", "success": True}})
+    elif mode == "fail":
+        send({"method": "account/login/completed", "params": {"loginId": "L1", "success": False, "error": "Token exchange failed"}})
+for line in sys.stdin:
+    m = json.loads(line)
+    meth, i = m.get("method"), m.get("id")
+    if meth == "initialize":
+        send({"id": i, "result": {"userAgent": "fake"}})
+    elif meth == "account/login/start":
+        if m["params"]["type"] == "chatgpt":
+            send({"id": i, "result": {"type": "chatgpt", "loginId": "L1", "authUrl": "https://auth.example/codex?state=s2"}})
+        else:
+            send({"id": i, "result": {"type": "chatgptDeviceCode", "loginId": "L1",
+                                      "verificationUrl": "https://auth.openai.com/codex/device", "userCode": "WXYZ-1234"}})
+        threading.Timer(0.3, complete).start()
+    elif meth == "account/read":
+        acct = {"type": "chatgpt", "email": "someone@example.com", "planType": "plus"} if os.path.exists(state) else None
+        send({"id": i, "result": {"account": acct, "requiresOpenaiAuth": True}})
+    elif meth == "account/logout":
+        if os.path.exists(state):
+            os.remove(state)
+        send({"id": i, "result": {}})
+    elif i is not None:
+        send({"id": i, "error": {"code": -32601, "message": "unknown method " + str(meth)}})

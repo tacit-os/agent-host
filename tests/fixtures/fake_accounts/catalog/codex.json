@@ -1,0 +1,82 @@
+{
+ "models": [
+  {
+   "id": "gpt-6-luna",
+   "label": "GPT-6-Luna",
+   "group": "OpenAI",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "medium",
+   "about": "Fast and affordable model for easier tasks.",
+   "source": "offered",
+   "isDefault": true
+  },
+  {
+   "id": "gpt-5.6-terra",
+   "label": "GPT-5.6-Terra",
+   "group": "OpenAI",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra"
+   ],
+   "defaultEffort": "medium",
+   "about": "Older balanced model for straightforward work.",
+   "source": "offered"
+  },
+  {
+   "id": "gpt-5.6-luna",
+   "label": "GPT-5.6-Luna",
+   "group": "OpenAI",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+   ],
+   "defaultEffort": "medium",
+   "about": "Older fast and efficient model.",
+   "source": "offered"
+  },
+  {
+   "id": "gpt-5.5",
+   "label": "GPT-5.5",
+   "group": "OpenAI",
+   "efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh"
+   ],
+   "defaultEffort": "medium",
+   "about": "Legacy coding model.",
+   "source": "offered"
+  }
+ ],
+ "commands": [
+  {
+   "name": "review",
+   "description": "Review my current changes",
+   "kind": "command"
+  },
+  {
+   "name": "init",
+   "description": "Create an AGENTS.md file",
+   "kind": "command"
+  },
+  {
+   "name": "plan-work",
+   "description": "Plan the work into tasks",
+   "kind": "skill"
+  }
+ ]
+}

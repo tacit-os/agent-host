@@ -1,0 +1,2 @@
+{"extends": "base.json", "patch": {"accounts": {"codex-personal": {"state": "signedOut", "email": null, "plan": null}}},
+  "signin": [{"account": "codex-personal", "method": "device", "steps": [{"after": 150, "step": "device", "url": "https://auth.openai.com/codex/device", "userCode": "WXYZ-1234"}]}]}

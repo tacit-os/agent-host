@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stands in for curl in catalog.rs's tests: notes its args and the config read from stdin in
+# $FAKE_OUT, and answers with ../anthropic-models.json.
+D=$(dirname "$0")/..
+printf '%s\n' "$@" > "$FAKE_OUT/curl.args"
+cat > "$FAKE_OUT/curl.config"
+cat "$D/anthropic-models.json"

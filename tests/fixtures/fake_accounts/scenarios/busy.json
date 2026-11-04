@@ -1,0 +1,3 @@
+{"extends": "base.json", "patch": {"accounts": {"codex-personal": {"state": "signedOut", "email": null, "plan": null},
+  "pi-personal": {"state": "signingIn", "providers": []}}},
+  "signin": [{"account": "codex-personal", "steps": [{"after": 150, "step": "busy", "holder": "pi"}]}]}

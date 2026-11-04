@@ -1,0 +1,17 @@
+#!/bin/sh
+# Stands in for pkexec in install.rs's tests: notes its args, and "installs" node and npm by linking
+# the fakes in ../node into $FAKE_BIN. FAKE_MODE=root: first leaves its process group for its
+# parent's, so its group can no longer be signalled, as pacman's under pkexec (root) cannot be by
+# the user; then takes 1.5 s.
+if [ "$FAKE_MODE" = root ]; then
+    echo $$ > "$FAKE_OUT/pkexec.pid"
+    export FAKE_MODE=slow
+    exec python3 -c 'import os, sys; os.setpgid(0, os.getpgid(os.getppid())); os.execvp("sh", ["sh"] + sys.argv[1:])' "$0" "$@"
+fi
+printf '%s\n' "$*" > "$FAKE_OUT/pkexec.args"
+[ "$FAKE_MODE" = slow ] && { echo "running as root"; sleep 1.5; }
+D=$(dirname "$0")/../node
+ln -s "$D/node" "$FAKE_BIN/node"
+ln -s "$D/npm" "$FAKE_BIN/npm"
+echo "resolving dependencies..."
+echo "installing nodejs..."

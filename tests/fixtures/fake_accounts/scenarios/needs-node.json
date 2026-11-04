@@ -1,0 +1,2 @@
+{"extends": "base.json", "node": false, "agents": {"codex": {"installed": false, "version": "", "route": "none"}},
+  "patch": {"accounts": {"codex-personal": {"state": "signedOut", "email": null, "plan": null}}}}

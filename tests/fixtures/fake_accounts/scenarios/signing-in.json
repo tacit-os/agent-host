@@ -1,0 +1,3 @@
+{"extends": "base.json", "patch": {"accounts": {"claude-personal": {"state": "signedOut", "email": null, "plan": null}}},
+  "signin": [{"account": "claude-personal", "steps": [{"after": 150, "step": "waiting", "url": "https://claude.ai/oauth/authorize?fake=1"}]}],
+  "onCode": [{"after": 300, "step": "done", "who": {"email": "abdul@example.com", "plan": "max"}}]}

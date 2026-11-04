@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stands in for pi in catalog.rs's tests: --list-models and an rpc get_commands from the fixtures;
+# the rpc process never ends by itself.
+D=$(dirname "$0")/..
+case "$*" in
+--version) echo "0.0.1" ;;
+*--list-models*) cat "$D/pi-list-models.txt" ;;
+*"--mode rpc"*)
+	echo $$ > "$FAKE_OUT/pi.pid"
+	read -r line
+	tr -d '\n' < "$D/pi-commands.json"
+	echo
+	exec sleep 30 ;;
+esac

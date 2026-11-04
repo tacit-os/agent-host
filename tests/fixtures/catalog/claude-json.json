@@ -1,0 +1,19 @@
+{
+ "numStartups": 12,
+ "oauthAccount": {
+  "emailAddress": "someone@example.com",
+  "organizationName": "Example"
+ },
+ "additionalModelOptionsCache": [
+  {
+   "value": "claude-fable-5-1[1m]",
+   "label": "Fable",
+   "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks"
+  }
+ ],
+ "projects": {
+  "/tmp/x": {
+   "allowedTools": []
+  }
+ }
+}
