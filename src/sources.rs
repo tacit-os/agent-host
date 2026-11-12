@@ -667,17 +667,26 @@ pub fn rename_offline(tool: &str, id: &str, path: &Path, title: &str) -> Result<
 // A Claude Code transcript and the folder beside it (sub-agents, tool results), or a pi session
 // file, moved to the Trash.
 pub fn trash_session(tool: &str, id: &str, path: &Path) -> Result<(), String> {
+    trash_session_with(tool, id, path, &|p| sh_ok(Command::new("gio").args(["trash", "--"]).arg(p)))
+}
+
+// `trash`: moves one path to the Trash. The transcript is the session: once it is trashed the session
+// is gone from every list, so a folder that then cannot be trashed is left behind and logged, not
+// answered as a failure of a delete that happened.
+fn trash_session_with(tool: &str, id: &str, path: &Path, trash: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match tool {
         "claude" if name == format!("{id}.jsonl") => {
-            sh_ok(Command::new("gio").args(["trash", "--"]).arg(path))?;
+            trash(path)?;
             let dir = path.with_extension("");
             if dir.is_dir() {
-                sh_ok(Command::new("gio").args(["trash", "--"]).arg(&dir))?;
+                if let Err(e) = trash(&dir) {
+                    eprintln!("agent-host: session {id}: its folder was not trashed: {e}");
+                }
             }
             Ok(())
         }
-        "pi" if name.ends_with(&format!("_{id}.jsonl")) => sh_ok(Command::new("gio").args(["trash", "--"]).arg(path)),
+        "pi" if name.ends_with(&format!("_{id}.jsonl")) => trash(path),
         "claude" | "pi" => Err(format!("{} is not session {id}", path.display())),
         _ => Err(format!("{tool} sessions are not files to trash")),
     }
@@ -693,6 +702,29 @@ fn proc_start(pid: u32) -> Option<String> {
 // outlives its process, and the pid can be reused: the process start time it records must still
 // match the process.
 pub fn terminal_holder(id: &str) -> Option<u32> {
+    holder_outside(id, 0)
+}
+
+// Whether `pid` is `ancestor` or runs beneath it.
+fn runs_under(pid: u32, ancestor: u32) -> bool {
+    let mut at = pid;
+    for _ in 0..32 {
+        if at == ancestor {
+            return true;
+        }
+        let Some(stat) = fs::read_to_string(format!("/proc/{at}/stat")).ok() else { return false };
+        // field 4 (ppid), after the command name that may hold spaces and parentheses
+        match stat.rsplit_once(')').and_then(|r| r.1.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok()) {
+            Some(p) if p > 1 => at = p,
+            _ => return false,
+        }
+    }
+    false
+}
+
+// terminal_holder, not counting the process `own` (0: none) and what runs beneath it: the host's own
+// process for the session has a record too, and it is not a terminal.
+pub fn holder_outside(id: &str, own: u32) -> Option<u32> {
     for f in list_dir(&home().join(".claude/sessions")) {
         if f.extension().map_or(true, |e| e != "json") {
             continue;
@@ -707,7 +739,7 @@ pub fn terminal_holder(id: &str) -> Option<u32> {
             Value::Number(n) => n.to_string(),
             _ => continue,
         };
-        if proc_start(pid).as_deref() == Some(start.as_str()) {
+        if proc_start(pid).as_deref() == Some(start.as_str()) && (own == 0 || !runs_under(pid, own)) {
             return Some(pid);
         }
     }
@@ -819,4 +851,34 @@ pub fn made_store(id: &str, made: &[Value]) -> Result<(), String> {
     let _ = fs::create_dir_all(file.parent().unwrap());
     let tmp = file.with_extension("tmp");
     fs::write(&tmp, Value::Array(all).to_string()).and_then(|_| fs::rename(&tmp, &file)).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    // The transcript trashed, its folder not: the session is gone, so the delete is answered as done.
+    #[test]
+    fn a_folder_that_will_not_trash_does_not_fail_a_delete() {
+        let dir = std::env::temp_dir().join(format!("sources-trash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("abc-1/subagents")).unwrap();
+        let file = dir.join("abc-1.jsonl");
+        fs::write(&file, "{}\n").unwrap();
+        let trashed = RefCell::new(Vec::new());
+        let trash = |p: &Path| {
+            if p.is_dir() {
+                return Err("Operation not permitted".to_string());
+            }
+            trashed.borrow_mut().push(p.to_path_buf());
+            Ok(())
+        };
+        assert_eq!(trash_session_with("claude", "abc-1", &file, &trash), Ok(()));
+        assert_eq!(*trashed.borrow(), vec![file.clone()]);
+        let refuse = |_: &Path| Err("no".to_string());
+        assert_eq!(trash_session_with("claude", "abc-1", &file, &refuse), Err("no".to_string()), "the transcript failing is a failure");
+        assert!(trash_session_with("claude", "other", &file, &trash).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

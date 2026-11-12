@@ -9,7 +9,8 @@
 //! is Done, Failed, Cancelled or NeedsNode. Cancel kills the step's process group and the steps
 //! after it never start. pacman, once pkexec has authorised it, runs as root and cannot be
 //! signalled: cancel then returns at once and sends Cancelled, and pacman is left to finish,
-//! holding the install lock until it ends.
+//! holding the install lock until it ends, when Cancelled is sent once more so the client reads
+//! the machine as it is then.
 
 use crate::signin::{command, drained, output, plain, read_lines, spawn, Proc};
 use serde_json::{json, Value};
@@ -119,6 +120,7 @@ struct State {
     ended: bool,
     proc: Option<Arc<Proc>>,
     tx: Option<Sender<InstallStep>>,
+    late: Option<Sender<InstallStep>>, // a step that outlived the cancel: where its end is told
 }
 
 struct Run {
@@ -149,6 +151,8 @@ impl Run {
         };
         if proc.map_or(true, |p| p.stop()) {
             release(self.id);
+        } else {
+            self.state.lock().unwrap().late = tx.clone();
         }
         if let Some(tx) = tx {
             let _ = tx.send(s);
@@ -208,7 +212,7 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
             on(s);
         }
     });
-    let run = Arc::new(Run { id, state: Mutex::new(State { ended: false, proc: None, tx: Some(tx) }) });
+    let run = Arc::new(Run { id, state: Mutex::new(State { ended: false, proc: None, tx: Some(tx), late: None }) });
     let local = home.join(".local");
     let mut steps: Vec<Vec<String>> = Vec::new();
     match package(agent) {
@@ -279,13 +283,17 @@ fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result
     let st = proc.wait();
     drained(&orx);
     drained(&erx);
-    let ended = {
+    let (ended, late) = {
         let mut s = run.state.lock().unwrap();
         s.proc = None;
-        s.ended
+        (s.ended, s.late.take())
     };
     if ended {
-        // a step that outlived its cancel (pacman as root) held the install lock until now
+        // a step that outlived its cancel (pacman as root) held the install lock until now: the client reads what it
+        // left (Node.js, now there) before a new install can start, so this goes first
+        if let Some(tx) = late {
+            let _ = tx.send(InstallStep::Cancelled);
+        }
         release(run.id);
         return Ok(());
     }
@@ -501,6 +509,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         assert!(INSTALLING.lock().unwrap().is_none(), "the lock is released when it ends");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).ok(), Some(InstallStep::Cancelled), "and the client is told again, to read the agents as they are now");
         assert!(!Path::new(&format!("/proc/{pid}")).exists(), "and it is reaped");
         assert!(!out.join("npm.args").exists(), "the npm step never started");
     }

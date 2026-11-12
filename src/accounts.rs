@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -347,7 +347,7 @@ fn account_json(s: &State, a: &Acct) -> Value {
             None => "noKey".into(),
             Some(k) if k["check"]["state"] == "refused" => "keyRefused".into(),
             Some(_) if s.keyring == "locked" => "locked".into(),
-            Some(_) if s.keyring == "absent" => "noKey".into(),
+            Some(_) if s.keyring == "absent" => "noKeyring".into(),
             Some(_) => "ready".into(),
         }
     } else {
@@ -493,7 +493,13 @@ pub fn fill(req: &Value, agent: &str) -> Result<Value, String> {
         }
         None => {
             let res = resolve(req["cwd"].as_str().unwrap_or(""), Some(agent));
+            // A model and a level are an account's own (it may not be offered the other's): a start that names a
+            // different account than the folder's does not take the folder's, and runs the agent's default.
+            let other = req["account"].is_string() && req["account"] != res["account"];
             for k in ["account", "model", "effort", "mode"] {
+                if other && (k == "model" || k == "effort") {
+                    continue;
+                }
                 if r[k].is_null() && res[k].is_string() {
                     r[k] = res[k].clone();
                 }
@@ -506,7 +512,14 @@ pub fn fill(req: &Value, agent: &str) -> Result<Value, String> {
         }
     }
     if let Some(id) = r["account"].as_str().map(str::to_string) {
-        let a = find(&st().file, &id).ok_or(format!("no such account: {id}"))?;
+        let Some(a) = find(&st().file, &id) else {
+            // a session that ran on an account since removed carries on on the agent's own
+            if from.is_some() {
+                r["account"] = Value::Null;
+                return Ok(r);
+            }
+            return Err(format!("no such account: {id}"));
+        };
         if a.agent != agent {
             return Err(format!("{id} is a {} account", a.agent));
         }
@@ -528,10 +541,26 @@ pub fn note_session(id: &str, account: &str) {
 
 // ── sign-in state ────────────────────────────────────────────────────────────────────────────
 
-fn set_status(s: &mut State, id: &str, st_: &signin::Status) {
+// When the account's credentials were last written (ms), None when it has no such file.
+fn credentials_at(a: &Acct) -> Option<u64> {
+    let dir = a.home.clone().unwrap_or_else(|| personal_dir(&a.agent));
+    credential_files(&a.agent).iter()
+        .filter_map(|f| fs::metadata(dir.join(f)).and_then(|m| m.modified()).ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64).max()
+}
+
+// `creds_at`: when the account's credentials were last written. A sign-in the host saw refused (`refusedAt`, set by
+// refused()) stays refused when the agent's own status still reads ready, which it can for a token that is revoked or
+// cannot be renewed, until the credentials are written again or a sign-in completes.
+fn set_status(s: &mut State, id: &str, st_: &signin::Status, creds_at: Option<u64>) {
     let old = s.file["status"][id].clone();
     let mut v = st_.to_json();
-    v["since"] = if old["state"] == st_.state { old["since"].clone() } else { json!(now_ms()) };
+    if let Some(at) = old["refusedAt"].as_u64().filter(|at| st_.state == "ready" && creds_at.is_some_and(|c| c <= *at)) {
+        v["state"] = old["state"].clone();
+        v["refusedAt"] = json!(at);
+    }
+    v["since"] = if old["state"] == v["state"] { old["since"].clone() } else { json!(now_ms()) };
     v["checked"] = json!(now_ms());
     s.file["status"][id] = v;
 }
@@ -573,6 +602,13 @@ fn check_in(id: &str, fresh: bool) {
             (a, installed)
         };
         if a.use_ == "key" {
+            // nothing to sign in to: the key is asked of its provider again, which also lifts a refusal that was a hiccup
+            if let Some(kid) = a.key.as_deref() {
+                if let Some((provider, secret)) = key_entry(&st().file, kid).and_then(|k| k["provider"].as_str().map(str::to_string)).zip(keys::lookup(kid).ok()) {
+                    let state = keys::check(&provider, &secret);
+                    note_key_check(&mut st().file, kid, state);
+                }
+            }
             return None;
         }
         if !installed {
@@ -586,7 +622,10 @@ fn check_in(id: &str, fresh: bool) {
     {
         let mut s = st();
         match got {
-            Some((_, Ok(status))) => set_status(&mut s, id, &status),
+            Some((_, Ok(status))) => {
+                let at = find(&s.file, id).and_then(|a| credentials_at(&a));
+                set_status(&mut s, id, &status, at);
+            }
             Some((_, Err(e))) => {
                 if s.file["status"][id]["state"].is_null() {
                     s.file["status"][id] = json!({"state": "signedOut", "since": now_ms()});
@@ -603,9 +642,49 @@ fn check_in(id: &str, fresh: bool) {
     push_state();
 }
 
-/// Every account at once, each on a thread of its own; returns when all have answered.
+// What the provider said of a key, kept as its check. "offline" says nothing of the key, so the last word stands.
+fn note_key_check(f: &mut Value, id: &str, state: &str) {
+    if state == "offline" {
+        return;
+    }
+    if let Some(k) = f["keys"].as_array_mut().and_then(|l| l.iter_mut().find(|k| k["id"] == id)) {
+        k["check"] = json!({"state": state, "at": now_ms()});
+    }
+}
+
+/// The keys marked refused, as (id, provider): a mark from one check or one failed session, which a
+/// brief 403 or a mistaken failure leaves in place until someone checks by hand.
+fn refused_keys(f: &Value) -> Vec<(String, String)> {
+    f["keys"].as_array().into_iter().flatten().filter(|k| k["check"]["state"] == "refused")
+        .filter_map(|k| Some((k["id"].as_str()?.to_string(), k["provider"].as_str()?.to_string()))).collect()
+}
+
+/// Asks the provider again about each refused key, so a refusal that was not lasting clears by itself.
+/// Only an answer about the key (it works, or it is refused again) changes the mark: "offline" says
+/// nothing, and a locked keyring gives no key to ask with.
+fn recheck_refused_keys() {
+    let refused = refused_keys(&st().file);
+    for (id, provider) in refused {
+        let Ok(secret) = keys::lookup(&id) else { continue };
+        let state = keys::check(&provider, &secret);
+        if !matches!(state, "ok" | "refused") {
+            continue;
+        }
+        let mut st_ = st();
+        if let Some(k) = st_.file["keys"].as_array_mut().and_then(|l| l.iter_mut().find(|k| k["id"] == id.as_str())) {
+            k["check"] = json!({"state": state, "at": now_ms()});
+        }
+        if let Err(e) = save(&st_.file) {
+            eprintln!("[accounts] key {id}: {e}");
+        }
+    }
+}
+
+/// Every account at once, each on a thread of its own; returns when all have answered. Refused keys
+/// are asked about again first, so their accounts are read with the answer.
 pub fn check_all() {
     refresh_keyring();
+    recheck_refused_keys();
     let ids: Vec<String> = all(&st().file).into_iter().map(|a| a.id).collect();
     let ts: Vec<_> = ids.into_iter().map(|id| thread::spawn(move || check(&id))).collect();
     for t in ts {
@@ -651,6 +730,7 @@ pub fn signed_in(agent: &str) -> (Value, String) {
         "noProvider" => (json!(false), "Needs a provider".into()),
         "locked" => (json!(false), "The keyring is locked".into()),
         "noKey" => (json!(false), "No key".into()),
+        "noKeyring" => (json!(false), "The keyring isn't running".into()),
         "keyRefused" => (json!(false), "The key was refused".into()),
         _ => (json!(false), a["reason"].as_str().filter(|r| *r == "Not installed").unwrap_or("Not signed in").into()),
     }
@@ -698,6 +778,7 @@ pub fn refused(agent: &str, account: Option<&str>, reason: &'static str) {
         let since = now_ms();
         s.file["status"][&id]["state"] = json!(reason);
         s.file["status"][&id]["since"] = json!(since);
+        s.file["status"][&id]["refusedAt"] = json!(since);
     }
     let _ = save(&s.file);
     drop(s);
@@ -1147,6 +1228,10 @@ fn login(req: &Value) -> Result<(), String> {
         push_state();
         if let signin::Step::Done { .. } = step {
             let (aid, agent) = (aid.clone(), agent.clone());
+            // a sign-in that just completed is no longer the refused one
+            if let Some(o) = st().file["status"][&aid].as_object_mut() {
+                o.remove("refusedAt");
+            }
             thread::spawn(move || {
                 check_fresh(&aid);
                 first_ready(&agent);
@@ -1193,6 +1278,11 @@ fn first_ready(agent: &str) {
 }
 
 fn remove(id: &str) -> Result<(), String> {
+    remove_with(id, &|dir| Command::new("gio").args(["trash", "--"]).arg(dir).status().is_ok_and(|s| s.success()))
+}
+
+// `trash` moves an account's folder to the Trash and says whether it did.
+fn remove_with(id: &str, trash: &dyn Fn(&Path) -> bool) -> Result<(), String> {
     let a = find(&st().file, id).ok_or(format!("no such account: {id}"))?;
     if a.personal {
         return Err("Personal can't be removed.".into());
@@ -1201,12 +1291,16 @@ fn remove(id: &str) -> Result<(), String> {
     if let Some(l) = l {
         l.cancel();
     }
-    // 1. its live sessions closed
+    // 1. its live sessions closed, and every session that ran on it back on the agent's own account: a
+    // follow-up would otherwise start the session on an account that is gone
     if let Some(sh) = SHARED.get() {
         let mut h = sh.lock().unwrap();
-        let open: Vec<String> = h.sessions.values().filter(|s| s.account.as_deref() == Some(id) && s.to_child.is_some()).map(|s| s.id.clone()).collect();
-        for sid in open {
+        let ran: Vec<String> = h.sessions.values().filter(|s| s.account.as_deref() == Some(id)).map(|s| s.id.clone()).collect();
+        for sid in ran {
             crate::close(&mut h, &sid, "closed");
+            if let Some(s) = h.sessions.get_mut(&sid) {
+                s.account = None;
+            }
             h.announce(&sid);
         }
         if a.agent == "codex" {
@@ -1230,11 +1324,10 @@ fn remove(id: &str) -> Result<(), String> {
                     fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
                 }
             }
-            if dir.exists() {
-                let ok = Command::new("gio").args(["trash", "--"]).arg(dir).status().is_ok_and(|s| s.success());
-                if !ok {
-                    return Err(format!("{} could not go to the Trash", dir.display()));
-                }
+            // The account is signed out and has no credentials left, so a folder the Trash will not take
+            // does not keep it listed (nothing could then remove it): it stays on disk, and the log says so.
+            if dir.exists() && !trash(dir) {
+                eprintln!("[accounts] {id}: {} could not go to the Trash", dir.display());
             }
         }
     }
@@ -1420,5 +1513,152 @@ mod tests {
         assert_eq!(auth_failure("pi", "No API key found for openrouter."), Some("signedOut"));
         assert_eq!(auth_failure("pi", "Please run /login"), None);
         assert_eq!(auth_failure("claude", "all good"), None);
+    }
+
+    #[test]
+    fn refused_keys_are_found_for_a_recheck() {
+        let f = json!({"keys": [
+            {"id": "k1", "provider": "openai", "check": {"state": "refused", "at": 1}},
+            {"id": "k2", "provider": "anthropic", "check": {"state": "ok", "at": 1}},
+            {"id": "k3", "provider": "google", "check": {"state": "offline", "at": 1}},
+            {"id": "k4", "provider": "openrouter"}]});
+        assert_eq!(refused_keys(&f), vec![("k1".to_string(), "openai".to_string())]);
+        assert!(refused_keys(&json!({})).is_empty());
+    }
+
+    // an added Claude key account named `id`, with a folder holding a file
+    fn key_account(id: &str) -> PathBuf {
+        crate::tests::scratch_home();
+        let dir = accounts_root().join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.local.json"), "{}").unwrap();
+        let mut s = st();
+        if s.file["keys"].as_array().is_some_and(|l| l.is_empty()) {
+            s.file["keys"].as_array_mut().unwrap().push(json!({"id": "k-1", "provider": "anthropic", "label": "Key", "last4": "1234", "use": []}));
+        }
+        let a = Acct { id: id.into(), agent: "claude".into(), label: "Work".into(), personal: false, home: Some(dir.clone()), use_: "key".into(),
+                       key: Some("k-1".into()) };
+        set_entry(&mut s.file, &a);
+        dir
+    }
+
+    fn host() -> crate::Shared {
+        SHARED.get_or_init(|| std::sync::Arc::new(Mutex::new(crate::Host::default()))).clone()
+    }
+
+    #[test]
+    fn a_refused_sign_in_stays_refused_while_the_agent_reads_ready() {
+        let mut s = State { file: json!({"status": {}}), signin: None, logins: HashMap::new(), install: None, installs: HashMap::new(),
+                            checking: HashSet::new(), agents: json!({}), node: false, keyring: "open", refreshing: HashSet::new(), checked_all: None };
+        let ready = signin::Status { state: "ready", email: Some("a@b.c".into()), plan: None, providers: Vec::new() };
+        s.file["status"]["claude-work"] = json!({"state": "expired", "since": 5, "refusedAt": 1000});
+        // credentials last written before the refusal: still refused, with the agent's other words kept
+        set_status(&mut s, "claude-work", &ready, Some(900));
+        assert_eq!(s.file["status"]["claude-work"]["state"], "expired");
+        assert_eq!(s.file["status"]["claude-work"]["since"], 5);
+        assert_eq!(s.file["status"]["claude-work"]["email"], "a@b.c");
+        // written again after it: the agent's word is taken
+        set_status(&mut s, "claude-work", &ready, Some(1500));
+        assert_eq!(s.file["status"]["claude-work"]["state"], "ready");
+        assert!(s.file["status"]["claude-work"]["refusedAt"].is_null());
+        // no credentials file to tell by: as before
+        s.file["status"]["claude-work"] = json!({"state": "signedOut", "since": 5, "refusedAt": 1000});
+        set_status(&mut s, "claude-work", &ready, None);
+        assert_eq!(s.file["status"]["claude-work"]["state"], "ready");
+    }
+
+    #[test]
+    fn a_key_checked_again_is_no_longer_refused_and_offline_changes_nothing() {
+        let mut f = json!({"accounts": [], "defaults": {}, "keys": [{"id": "k-1", "provider": "anthropic", "check": {"state": "refused", "at": 1}}]});
+        note_key_check(&mut f, "k-1", "offline");
+        assert_eq!(f["keys"][0]["check"], json!({"state": "refused", "at": 1}));
+        note_key_check(&mut f, "k-1", "ok");
+        assert_eq!(f["keys"][0]["check"]["state"], "ok");
+        note_key_check(&mut f, "k-1", "refused");
+        assert_eq!(f["keys"][0]["check"]["state"], "refused");
+        let a = Acct { id: "claude-work".into(), agent: "claude".into(), label: "Work".into(), personal: false, home: None, use_: "key".into(),
+                       key: Some("k-1".into()) };
+        set_entry(&mut f, &a);
+        f["status"] = json!({});
+        let s = State { file: f, signin: None, logins: HashMap::new(), install: None, installs: HashMap::new(), checking: HashSet::new(),
+                        agents: json!({}), node: false, keyring: "open", refreshing: HashSet::new(), checked_all: None };
+        assert_eq!(account_json(&s, &a)["state"], "keyRefused");
+    }
+
+    #[test]
+    fn a_key_account_with_no_keyring_is_not_one_with_no_key() {
+        let mut f = json!({"accounts": [], "keys": [{"id": "k-1", "provider": "anthropic"}], "status": {}, "defaults": {}});
+        let a = Acct { id: "claude-work".into(), agent: "claude".into(), label: "Work".into(), personal: false, home: None, use_: "key".into(),
+                       key: Some("k-1".into()) };
+        set_entry(&mut f, &a);
+        let mut s = State { file: f, signin: None, logins: HashMap::new(), install: None, installs: HashMap::new(), checking: HashSet::new(),
+                            agents: json!({}), node: false, keyring: "absent", refreshing: HashSet::new(), checked_all: None };
+        assert_eq!(account_json(&s, &a)["state"], "noKeyring");
+        s.keyring = "open";
+        assert_eq!(account_json(&s, &a)["state"], "ready");
+        let b = Acct { key: Some("k-gone".into()), ..a };
+        assert_eq!(account_json(&s, &b)["state"], "noKey");
+    }
+
+    #[test]
+    fn sessions_of_a_removed_account_carry_on_on_the_agents_own() {
+        key_account("claude-work");
+        let sh = host();
+        {
+            let mut h = sh.lock().unwrap();
+            for (id, live) in [("5b0f1c2e-0000-4000-8000-00000000a001", true), ("5b0f1c2e-0000-4000-8000-00000000a002", false)] {
+                let mut s = crate::Session::new(id, "/", "claude");
+                s.account = Some("claude-work".into());
+                s.used = true;
+                if live {
+                    s.to_child = Some(std::sync::mpsc::channel().0);
+                }
+                h.sessions.insert(id.into(), s);
+            }
+        }
+        remove_with("claude-work", &|_| true).unwrap();
+        {
+            let h = sh.lock().unwrap();
+            for id in ["5b0f1c2e-0000-4000-8000-00000000a001", "5b0f1c2e-0000-4000-8000-00000000a002"] {
+                assert_eq!(h.sessions[id].account, None, "{id} still names the removed account");
+                assert!(h.sessions[id].to_child.is_none());
+            }
+        }
+        // the app's resume may still name it
+        let r = fill(&json!({"op": "start", "cwd": "/", "resume": "5b0f1c2e-0000-4000-8000-00000000a001", "account": "claude-work"}), "claude").unwrap();
+        assert!(r["account"].is_null());
+        assert!(fill(&json!({"op": "start", "cwd": "/", "account": "claude-work"}), "claude").is_err());
+    }
+
+    #[test]
+    fn an_account_whose_folder_cannot_go_to_the_trash_is_still_removed() {
+        let dir = key_account("claude-stuck");
+        remove_with("claude-stuck", &|_| false).unwrap();
+        assert!(find(&st().file, "claude-stuck").is_none(), "the account is still listed");
+        assert!(dir.exists(), "nothing deletes the folder but the Trash");
+    }
+
+    #[test]
+    fn another_account_does_not_take_the_folders_model() {
+        key_account("claude-switch");
+        {
+            let mut s = st();
+            s.file["defaults"]["folders"]["/srv/switch-test"] = json!({"run": {"claude": {"account": "claude-switch", "model": "opus", "effort": "high"}}, "mode": "plan"});
+        }
+        let start = |account: Option<&str>| {
+            let mut q = json!({"op": "start", "cwd": "/srv/switch-test"});
+            if let Some(a) = account {
+                q["account"] = json!(a);
+            }
+            fill(&q, "claude").unwrap()
+        };
+        // the folder's own account: its model and level, as before
+        for r in [start(None), start(Some("claude-switch"))] {
+            assert_eq!((r["model"].as_str(), r["effort"].as_str(), r["mode"].as_str()), (Some("opus"), Some("high"), Some("plan")));
+        }
+        // another account of the agent: its own default model and level, the folder's mode still
+        let r = start(Some(&personal_id("claude")));
+        assert!(r["model"].is_null() && r["effort"].is_null(), "the folder's model went to another account: {r}");
+        assert_eq!(r["mode"], "plan");
     }
 }

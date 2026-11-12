@@ -848,6 +848,7 @@ fn start(shared: &Shared, h: &mut Host, req: &Value, tool: &'static str) -> Resu
     if !valid_id(&id) {
         return Err(format!("not a session id: {id}"));
     }
+    let fresh = !h.sessions.contains_key(&id);
     let s = h.sessions.entry(id.clone()).or_insert_with(|| Session::new(&id, cwd, tool));
     if s.tool != tool {
         return Err(format!("{id} is a {} session", s.tool));
@@ -856,11 +857,17 @@ fn start(shared: &Shared, h: &mut Host, req: &Value, tool: &'static str) -> Resu
         s.used = true;
     }
     take_requests(s, req);
+    if s.to_child.is_none() && s.pid == 0 {
+        if let Err(e) = spawn(shared, h, &id) {
+            // a session that never ran (a locked keyring, a removed account) is not kept, nor is it recorded as ours
+            if fresh {
+                h.sessions.remove(&id);
+            }
+            return Err(e);
+        }
+    }
     if resume.is_none() && req["id"].as_str().is_none() {
         own(&id);
-    }
-    if s.to_child.is_none() && s.pid == 0 {
-        spawn(shared, h, &id)?;
     }
     if let Some(t) = req["text"].as_str() {
         send_message(shared, h, &id, t, &path_list(req, "images"), &path_list(req, "files"))?;
@@ -871,6 +878,15 @@ fn start(shared: &Shared, h: &mut Host, req: &Value, tool: &'static str) -> Resu
 
 fn path_list(req: &Value, key: &str) -> Vec<String> {
     req[key].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect()
+}
+
+// Every permission request still open on the session is refused, for an interrupt. An error (the agent had
+// already dropped it) is nothing to report: the card is gone either way.
+fn refuse_pending(h: &mut Host, id: &str) {
+    let open: Vec<Value> = h.sessions.get(id).map(|s| s.pending.iter().map(|p| p["request"].clone()).collect()).unwrap_or_default();
+    for rid in open {
+        let _ = answer(h, id, &json!({"op": "answer", "id": id, "request": rid, "allow": false, "message": "Stopped by the user.", "interrupt": true}));
+    }
 }
 
 fn answer(h: &mut Host, id: &str, req: &Value) -> Result<(), String> {
@@ -898,6 +914,9 @@ fn answer(h: &mut Host, id: &str, req: &Value) -> Result<(), String> {
     } else {
         json!({"behavior": "deny", "message": req["message"].as_str().unwrap_or("Denied in the Claude app.")})
     };
+    if req["interrupt"] == true && req["allow"].as_bool() != Some(true) {
+        response["interrupt"] = json!(true);
+    }
     // "Always allow": the client passes back the suggestions it picked and Claude saves them.
     if let Some(perms) = req.get("permissions") {
         response["updatedPermissions"] = perms.clone();
@@ -959,15 +978,18 @@ fn handle(shared: &Shared, h: &mut Host, cid: u64, req: &Value, tool: Option<&'s
             Ok(ok)
         }
         "interrupt" => {
-            match tool {
-                "codex" => codex::interrupt(h, &id)?,
-                "opencode" => opencode::interrupt(h, &id)?,
-                "pi" => pi::interrupt(h, &id)?,
-                _ => {
-                    h.control(&id, json!({"subtype": "interrupt"}))?;
-                }
-            }
-            Ok(ok)
+            // The cards the turn is stopped under are refused first: agents do not all take a stop as the end
+            // of a question, and a card left standing kept asking about a tool that would never run (a
+            // follow-up sent instead of an answer left it up until Cancel was pressed).
+            refuse_pending(h, &id);
+            let stopped = match tool {
+                "codex" => codex::interrupt(h, &id),
+                "opencode" => opencode::interrupt(h, &id),
+                "pi" => pi::interrupt(h, &id),
+                _ => h.control(&id, json!({"subtype": "interrupt"})).map(drop),
+            };
+            h.announce(&id);
+            stopped.map(|_| ok)
         }
         // Answered when Claude Code answers (on_event): rewind the conversation to just before one
         // of your messages; see or undo the file changes made since one; ask aside without
@@ -1283,6 +1305,11 @@ fn fork(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
 // theirs, archived (their own way of hiding a session, which can be undone in them).
 fn delete(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
     let id = req["id"].as_str().ok_or("delete needs an id")?;
+    // refused before anything is stopped: a terminal that has the session open (the host's own process for it is not one)
+    let own = shared.lock().unwrap().sessions.get(id).map_or(0, |s| s.pid);
+    if history::holder_outside(id, own).is_some() {
+        return Err("Open in a terminal".into());
+    }
     // a live session is closed first (a running Codex or opencode turn is stopped), and its process
     // waited for, so nothing writes its files after they have gone
     let live = {
@@ -1454,18 +1481,20 @@ fn past_op(shared: &Shared, past: &Past, op: &str, req: &Value, full: bool) -> R
             let (path, tool) = locate(past, id)?;
             if op == "results" || op == "read_reports" || op == "ask" {
                 let agents = if tool == "claude" { agents_reply(shared, &path, id) } else { json!({}) };
+                // a turn is running only while the host's session is mid-turn (working, or waiting on an answer)
+                let working = shared.lock().unwrap().sessions.get(id).is_some_and(|s| s.state != "idle");
                 if op == "read_reports" {
-                    return Ok(json!({"ev": op, "id": id, "queued": results::read_reports(&path, tool, &agents, id)}));
+                    return Ok(json!({"ev": op, "id": id, "queued": results::read_reports(&path, tool, &agents, id, working)}));
                 }
                 if op == "ask" {
                     let q = req["q"].as_str().filter(|q| !q.trim().is_empty()).ok_or("ask needs a question")?;
-                    let mut a = results::ask(&path, tool, &agents, id, q)?;
+                    let mut a = results::ask(&path, tool, &agents, id, working, q)?;
                     a["ev"] = json!("ask");
                     a["id"] = json!(id);
                     a["q"] = json!(q);
                     return Ok(a);
                 }
-                let mut r = results::results(&path, tool, &agents, id);
+                let mut r = results::results(&path, tool, &agents, id, working);
                 r["ev"] = json!("results");
                 r["id"] = json!(id);
                 return Ok(r);
@@ -1668,5 +1697,106 @@ fn main() {
     for stream in listener.incoming().flatten() {
         let (sh, pa) = (shared.clone(), past.clone());
         thread::spawn(move || serve(sh, pa, stream));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // HOME and the accounts file for these tests (and any other that reaches the accounts state): start
+    // writes ~/.local/state, delete reads ~/.claude/sessions, accounts keep their folders under ~/.local/share
+    pub(crate) fn scratch_home() -> PathBuf {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let p = env::temp_dir().join(format!("agent-host-main-test-{}", process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            env::set_var("HOME", &p);
+            env::set_var("AGENT_HOST_CONFIG", p.join(".config/agent-host"));
+            p
+        })
+        .clone()
+    }
+
+    #[test]
+    fn a_start_that_cannot_spawn_leaves_no_session() {
+        let home = scratch_home();
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let mut h = shared.lock().unwrap();
+        // a codex session has no process of its own, so its spawn is refused
+        let r = start(&shared, &mut h, &json!({"op": "start", "cwd": home.to_str().unwrap()}), "codex");
+        assert!(r.is_err());
+        assert!(h.sessions.is_empty(), "the failed start left a session in the list");
+        assert!(!history::own_file().exists(), "the failed start was recorded as ours");
+    }
+
+    // ~/.claude/sessions/<pid>.json as Claude Code writes it for a process that has the session open
+    fn hold(home: &Path, id: &str, pid: u32) {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let start = stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19).unwrap().to_string();
+        let dir = home.join(".claude/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{pid}.json")), json!({"sessionId": id, "pid": pid, "procStart": start}).to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_refused_delete_has_not_closed_the_session() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d001";
+        hold(&home, id, process::id());
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let (tx, _rx) = channel::<String>();
+        {
+            let mut h = shared.lock().unwrap();
+            let mut s = Session::new(id, home.to_str().unwrap(), "claude");
+            s.to_child = Some(tx);
+            h.sessions.insert(id.into(), s);
+        }
+        let past: Past = Arc::new(Mutex::new(History::default()));
+        let r = delete(&shared, &past, &json!({"op": "delete", "id": id}));
+        assert_eq!(r.unwrap_err(), "Open in a terminal");
+        let h = shared.lock().unwrap();
+        assert!(h.sessions[id].to_child.is_some(), "the refused delete closed the session's process");
+    }
+
+    #[test]
+    fn the_hosts_own_process_is_not_a_terminal() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d002";
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        hold(&home, id, child.id());
+        // the host's own child, or what it started
+        assert_eq!(history::holder_outside(id, child.id()), None);
+        assert_eq!(history::holder_outside(id, process::id()), None);
+        // with no process of the host's own, or another's, it is a terminal
+        assert_eq!(history::holder_outside(id, 0), Some(child.id()));
+        assert_eq!(history::holder_outside(id, child.id() + 1), Some(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    // Stopping a turn that waits on a permission card refuses the card, so a follow-up sent instead of an
+    // answer does not leave it standing.
+    #[test]
+    fn an_interrupt_refuses_the_cards_it_stops() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d003";
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let (tx, rx) = channel::<String>();
+        let mut h = shared.lock().unwrap();
+        let mut s = Session::new(id, home.to_str().unwrap(), "claude");
+        s.to_child = Some(tx);
+        s.state = "waiting";
+        s.pending.push(json!({"request": "r1", "tool": "Bash", "input": {}}));
+        h.sessions.insert(id.into(), s);
+        handle(&shared, &mut h, 0, &json!({"op": "interrupt", "id": id}), None).unwrap();
+        assert!(h.sessions[id].pending.is_empty(), "the card is still pending after an interrupt");
+        assert_eq!(h.sessions[id].state, "working");
+        let sent: Vec<Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+        assert_eq!(sent[0]["response"]["request_id"], "r1");
+        assert_eq!(sent[0]["response"]["response"]["behavior"], "deny");
+        assert_eq!(sent[0]["response"]["response"]["interrupt"], true);
+        assert_eq!(sent[1]["request"]["subtype"], "interrupt");
     }
 }

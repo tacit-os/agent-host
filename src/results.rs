@@ -70,7 +70,7 @@ struct Source {
     pictures: Vec<Value>,
 }
 
-fn sources(path: &Path, tool: &str, agents: &Value) -> Vec<Source> {
+fn sources(path: &Path, tool: &str, agents: &Value, working: bool) -> Vec<Source> {
     let mut out = Vec::new();
     let text = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_string();
     let mut add = |id: &str, name: String, run: String, state: String| {
@@ -95,7 +95,7 @@ fn sources(path: &Path, tool: &str, agents: &Value) -> Vec<Source> {
         }
     }
     if out.is_empty() {
-        out = turns(path, tool);
+        out = turns(path, tool, working);
     }
     out.sort_by_key(|s| s.ended);
     out
@@ -105,8 +105,9 @@ static TURNS: OnceLock<Mutex<HashMap<PathBuf, (u64, Vec<Value>)>>> = OnceLock::n
 
 // A session's own turns as sources (its last 30 with words at the end): what was asked, the last
 // thing said, what its steps changed and the pictures they read. The newest turn counts as running
-// while its transcript was written in the last two minutes.
-fn turns(path: &Path, tool: &str) -> Vec<Source> {
+// while the host's session is working (`working`); a transcript written a moment ago says nothing,
+// the turn that just ended wrote it.
+fn turns(path: &Path, tool: &str, working: bool) -> Vec<Source> {
     let meta = fs::metadata(path).ok();
     let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let cache = TURNS.get_or_init(Default::default);
@@ -144,12 +145,11 @@ fn turns(path: &Path, tool: &str) -> Vec<Source> {
         cache.lock().unwrap().insert(path.to_path_buf(), (len, list.clone()));
         list
     });
-    let fresh = meta.and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|e| e < Duration::from_secs(120));
     let n = list.len();
     list.into_iter().enumerate().filter(|(_, t)| t["report"] != "").collect::<Vec<_>>().into_iter().rev().take(30).rev()
         .map(|(i, t)| Source {
             key: format!("turn-{}", i + 1), name: format!("Turn {}", i + 1), run: String::new(),
-            state: if fresh && i + 1 == n { "running" } else { "done" }.into(),
+            state: if working && i + 1 == n { "running" } else { "done" }.into(),
             asked: t["asked"].as_str().unwrap_or("").into(), report: t["report"].as_str().unwrap_or("").into(),
             structured: false, ended: t["ended"].as_u64().unwrap_or(0),
             files: t["files"].as_array().cloned().unwrap_or_default(), pictures: t["pictures"].as_array().cloned().unwrap_or_default(),
@@ -309,7 +309,7 @@ struct Queue {
     jobs: VecDeque<Job>,
     queued: HashMap<String, String>, // key -> session
     workers: usize,
-    error: String,
+    errors: HashMap<String, String>, // session -> why its last reading failed
 }
 
 static QUEUE: OnceLock<Mutex<Queue>> = OnceLock::new();
@@ -319,9 +319,9 @@ fn queue() -> MutexGuard<'static, Queue> {
 }
 
 // read_reports: the session's written reports not read yet, queued.
-pub fn read_reports(path: &Path, tool: &str, agents: &Value, session: &str) -> usize {
+pub fn read_reports(path: &Path, tool: &str, agents: &Value, session: &str, working: bool) -> usize {
     let mut n = 0;
-    for s in sources(path, tool, agents).iter().filter(|s| written(s)) {
+    for s in sources(path, tool, agents, working).iter().filter(|s| written(s)) {
         let key = read_key(s);
         if cached(&key).is_some() {
             continue;
@@ -332,7 +332,7 @@ pub fn read_reports(path: &Path, tool: &str, agents: &Value, session: &str) -> u
         }
         q.queued.insert(key.clone(), session.to_string());
         q.jobs.push_back(Job { key, session: session.to_string(), prompt: read_prompt(s) });
-        q.error.clear();
+        q.errors.remove(session);
         n += 1;
         if q.workers < WORKERS {
             q.workers += 1;
@@ -361,11 +361,21 @@ fn work() {
             fs::create_dir_all(dir()).and_then(|_| fs::write(&tmp, v.to_string())).and_then(|_| fs::rename(&tmp, &p))
                 .map_err(|e| format!("keep a reading: {e}"))
         });
-        let mut q = queue();
-        q.queued.remove(&job.key);
-        if let Err(e) = done {
+        settle(&mut queue(), &job, done);
+    }
+}
+
+// A reading ended: the session that asked for it is told if it failed, and only that session; a reading
+// that worked clears the session's earlier failure.
+fn settle(q: &mut Queue, job: &Job, done: Result<(), String>) {
+    q.queued.remove(&job.key);
+    match done {
+        Ok(()) => {
+            q.errors.remove(&job.session);
+        }
+        Err(e) => {
             eprintln!("[results] {}: {e}", job.key);
-            q.error = e;
+            q.errors.insert(job.session.clone(), e);
         }
     }
 }
@@ -427,8 +437,8 @@ fn need(status: &str) -> &'static str {
     if matches!(status, "problem" | "open") { "look" } else { "settled" }
 }
 
-pub fn results(path: &Path, tool: &str, agents: &Value, session: &str) -> Value {
-    let all = sources(path, tool, agents);
+pub fn results(path: &Path, tool: &str, agents: &Value, session: &str, working: bool) -> Value {
+    let all = sources(path, tool, agents, working);
     let mut findings: Vec<Value> = Vec::new();
     let mut reports = Vec::new();
     let (mut unread, mut unread_cost) = (0, 0.0);
@@ -552,7 +562,7 @@ pub fn results(path: &Path, tool: &str, agents: &Value, session: &str) -> Value 
     let count = |st: &str| all.iter().filter(|s| s.state == st).count();
     let (reading, error) = {
         let q = queue();
-        (q.queued.values().filter(|s| *s == session).count(), q.error.clone())
+        (q.queued.values().filter(|s| *s == session).count(), q.errors.get(session).cloned().unwrap_or_default())
     };
     json!({"findings": findings, "reports": reports, "failures": failures, "pictures": pictures, "changes": changes,
            "counts": {"sources": all.len(), "running": count("running"), "done": count("done"), "failed": count("failed"),
@@ -586,9 +596,9 @@ fn file_of(name: &str, cwd: &Path, edited: &[&str]) -> Option<PathBuf> {
 
 // A question about the results, answered by Sonnet from the findings and the reports; the sources
 // it names are kept only when they are this session's.
-pub fn ask(path: &Path, tool: &str, agents: &Value, session: &str, q: &str) -> Result<Value, String> {
-    let all = sources(path, tool, agents);
-    let r = results(path, tool, agents, session);
+pub fn ask(path: &Path, tool: &str, agents: &Value, session: &str, working: bool, q: &str) -> Result<Value, String> {
+    let all = sources(path, tool, agents, working);
+    let r = results(path, tool, agents, session, working);
     let mut m = String::from("Findings:\n");
     for f in r["findings"].as_array().into_iter().flatten().take(300) {
         let ids: Vec<&str> = f["sources"].as_array().into_iter().flatten().filter_map(|s| s["source"].as_str()).collect();
@@ -661,5 +671,40 @@ mod tests {
     #[test]
     fn levels() {
         assert_eq!([level("P1"), level("major"), level("minor"), level("note"), level("")], ["high", "medium", "low", "low", ""]);
+    }
+
+    // A session without sub-agents: the turn that just ended is not "running" because its transcript is fresh;
+    // only the host saying the session is working makes it so.
+    #[test]
+    fn a_fresh_turn_is_running_only_while_the_session_works() {
+        let dir = std::env::temp_dir().join(format!("results-turns-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("turns-test.jsonl");
+        let ts = "2026-10-25T00:00:00.000Z";
+        let lines = [
+            json!({"type": "user", "uuid": "u1", "timestamp": ts, "message": {"role": "user", "content": "check the timer"}}),
+            json!({"type": "assistant", "uuid": "a1", "timestamp": ts, "message": {"role": "assistant", "content": [{"type": "text", "text": "The timer is fine."}]}}),
+        ];
+        fs::write(&file, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let idle = turns(&file, "claude", false);
+        assert_eq!((idle.len(), idle[0].state.as_str()), (1, "done"));
+        let r = results(&file, "claude", &json!({}), "turns-test", false);
+        assert_eq!((r["counts"]["running"].clone(), r["reports"].as_array().unwrap().len()), (json!(0), 1));
+        assert_eq!(turns(&file, "claude", true)[0].state, "running");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A failed reading is shown to the session that asked for it, not to every session.
+    #[test]
+    fn a_reading_error_belongs_to_its_session() {
+        let job = |session: &str| Job { key: format!("k-{session}"), session: session.into(), prompt: String::new() };
+        let mut q = Queue::default();
+        q.queued.insert("k-a".into(), "a".into());
+        settle(&mut q, &job("a"), Err("Claude Code did not answer".into()));
+        assert_eq!(q.errors.get("a").map(String::as_str), Some("Claude Code did not answer"));
+        assert!(q.errors.get("b").is_none());
+        assert!(q.queued.is_empty());
+        settle(&mut q, &job("a"), Ok(()));
+        assert!(q.errors.is_empty(), "a reading that worked clears the failure");
     }
 }

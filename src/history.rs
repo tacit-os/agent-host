@@ -7,10 +7,10 @@
 
 #[path = "sources.rs"]
 mod sources;
-pub use sources::{made_load, made_store, rename_offline, sweep_made, terminal_holder, tool_of, trash_session};
+pub use sources::{holder_outside, made_load, made_store, rename_offline, sweep_made, terminal_holder, tool_of, trash_session};
 
 use base64::Engine;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::hash::{Hash, Hasher};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -649,6 +649,31 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
+// The text of an edit for the diff view, cut to whole lines: no "…" glued to a last line that looks like the
+// file's own, and the number of lines left out (one at least, for a single long line), for the view to say.
+fn clip_lines(s: &str, n: usize) -> (String, usize) {
+    let Some((i, _)) = s.char_indices().nth(n) else { return (s.to_string(), 0) };
+    let kept = match s[..i].rfind('\n') {
+        Some(nl) if !s[i..].starts_with('\n') => &s[..nl],
+        _ => &s[..i],
+    };
+    (kept.to_string(), (s.lines().count() - kept.lines().count()).max(1))
+}
+
+// A tool result is cut in the middle: a failing build or test says why at its end, so the head and the tail stay
+// (the tail the larger part) and a line between says how much is left out.
+fn clip_result(s: &str, n: usize) -> String {
+    let total = s.chars().count();
+    if total <= n {
+        return s.to_string();
+    }
+    let head = n / 3;
+    let tail = n - head;
+    let h = s.char_indices().nth(head).map_or(s.len(), |(i, _)| i);
+    let t = s.char_indices().nth(total - tail).map_or(s.len(), |(i, _)| i);
+    format!("{}\n… {} characters left out …\n{}", &s[..h], total - head - tail, &s[t..])
+}
+
 fn first_text(content: &Value) -> Option<String> {
     if let Some(s) = content.as_str() {
         return Some(s.to_string());
@@ -1266,7 +1291,7 @@ fn result_text(c: &Value) -> String {
 }
 
 fn attach(items: &mut Vec<Value>, calls: &HashMap<String, usize>, id: &str, content: &Value, error: bool, media: bool) {
-    let result = clip(result_text(content).trim(), 400);
+    let result = clip_result(result_text(content).trim(), 400);
     let pics = if media { images(content) } else { Vec::new() };
     match calls.get(id) {
         Some(&i) => {
@@ -1474,6 +1499,17 @@ fn is_narration(sig: &str) -> bool {
     field(&raw, 2).and_then(|f| field(f, 1)).and_then(|f| field(f, 8)) == Some(b"narration".as_slice())
 }
 
+// A command's exit status in a rollout without item events: the output text opens "Exit code: N" or is
+// JSON whose metadata holds exit_code. Anything else (no command, no status) did not fail.
+fn codex_exit_failed(output: &Value) -> bool {
+    let Some(text) = output.as_str() else { return false };
+    let text = text.trim_start();
+    if let Some(rest) = text.strip_prefix("Exit code:") {
+        return rest.trim_start().split(|c: char| !(c.is_ascii_digit() || c == '-')).next().and_then(|n| n.parse::<i64>().ok()).is_some_and(|n| n != 0);
+    }
+    text.starts_with('{') && serde_json::from_str::<Value>(text).is_ok_and(|j| j["metadata"]["exit_code"].as_i64().is_some_and(|n| n != 0))
+}
+
 fn codex_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, usize>, media: bool) {
     let ts = parse_ts(v["timestamp"].as_str().unwrap_or(""));
     let p = &v["payload"];
@@ -1510,7 +1546,7 @@ fn codex_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, usi
             }
         }
         "function_call_output" | "custom_tool_call_output" => {
-            attach(items, calls, p["call_id"].as_str().unwrap_or(""), &p["output"], false, media);
+            attach(items, calls, p["call_id"].as_str().unwrap_or(""), &p["output"], codex_exit_failed(&p["output"]), media);
         }
         _ => {}
     }
@@ -1588,7 +1624,7 @@ fn codex_v2_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, 
         }
         "CommandExecution" => {
             let mut t = tool_item("Bash", &json!({"command": command_text(&it["command"])}), ts);
-            t["result"] = Value::String(clip(it["aggregated_output"].as_str().unwrap_or("").trim(), 400));
+            t["result"] = Value::String(clip_result(it["aggregated_output"].as_str().unwrap_or("").trim(), 400));
             t["error"] = Value::Bool(it["exit_code"].as_i64().is_some_and(|c| c != 0) || it["status"] == "failed");
             tool(items, t);
         }
@@ -1611,22 +1647,26 @@ fn codex_v2_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, 
                     _ => {
                         adds = false;
                         patch += &format!("*** Update File: {path}\n");
-                        c["unified_diff"].as_str().unwrap_or("").lines().filter(|l| !l.starts_with("+++") && !l.starts_with("---"))
-                            .map(|l| format!("{l}\n")).collect::<String>()
+                        // the "---"/"+++" file header comes before the first hunk; after it, a line that starts so is content
+                        let mut hunks = false;
+                        c["unified_diff"].as_str().unwrap_or("").lines().filter(|l| {
+                            hunks |= l.starts_with("@@");
+                            hunks || !(l.starts_with("+++") || l.starts_with("---"))
+                        }).map(|l| format!("{l}\n")).collect::<String>()
                     }
                 };
                 patch += &body;
             }
             let mut t = tool_item("apply_patch", &json!({"input": patch}), ts);
             t["tool"] = json!(if adds { "Write" } else { "Edit" });
-            t["result"] = Value::String(clip(it["stdout"].as_str().unwrap_or("").trim(), 400));
+            t["result"] = Value::String(clip_result(it["stdout"].as_str().unwrap_or("").trim(), 400));
             t["error"] = Value::Bool(it["status"] == "failed");
             tool(items, t);
         }
         "McpToolCall" => {
             let name = format!("mcp__{}__{}", it["server"].as_str().unwrap_or(""), it["tool"].as_str().unwrap_or(""));
             let mut t = tool_item(&name, &it["arguments"], ts);
-            t["result"] = Value::String(clip(result_text(&it["result"]["content"]).trim(), 400));
+            t["result"] = Value::String(clip_result(result_text(&it["result"]["content"]).trim(), 400));
             t["error"] = Value::Bool(it["status"] == "failed");
             tool(items, t);
         }
@@ -1637,6 +1677,49 @@ fn codex_v2_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, 
         }
         _ => {}
     }
+}
+
+// A workflow's row: the saved workflow's name, else what its script's `meta` says it does (its description, else its
+// name), so the row reads "Review changed files…" instead of the script's first line.
+fn workflow_label(input: &Value) -> String {
+    if let Some(n) = input["name"].as_str().filter(|n| !n.trim().is_empty()) {
+        return n.trim().to_string();
+    }
+    let script = input["script"].as_str().unwrap_or("");
+    let meta = script.find("meta").map_or("", |i| &script[i..]);
+    for key in ["description", "name"] {
+        if let Some(v) = quoted_after(meta, key) {
+            return v;
+        }
+    }
+    "A workflow".to_string()
+}
+
+// The quoted string after `key:` in a JS object literal ('…', "…" or `…`), when there is one.
+fn quoted_after(text: &str, key: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(i) = text[from..].find(key) {
+        let at = from + i;
+        from = at + key.len();
+        let before = text[..at].chars().last();
+        if before.map_or(false, |c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let rest = text[from..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let rest = rest.trim_start();
+        let q = rest.chars().next()?;
+        if !matches!(q, '\'' | '"' | '`') {
+            continue;
+        }
+        let body = &rest[1..];
+        let end = body.find(q)?;
+        let v = body[..end].trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
@@ -1657,9 +1740,11 @@ fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
             .or_else(|| input["command"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")))
             .unwrap_or_default(),
         "apply_patch" => patch_files(&s("input")).iter().map(|f| short(f.0.clone())).collect::<Vec<_>>().join(", "),
-        _ => ["command", "cmd", "path", "file_path", "url", "query", "pattern", "description"].iter()
-                .find_map(|k| input[*k].as_str())
-                .or_else(|| input.as_object().and_then(|o: &Map<String, Value>| o.values().find_map(Value::as_str)))
+        "Workflow" => workflow_label(input),
+        // an unknown tool: only a field that names what it does. The first string of an object is an id or a flag as
+        // often as words, and a script or other multi-line value is code ("export const meta = {" says nothing)
+        _ => ["command", "cmd", "path", "file_path", "url", "query", "pattern", "description", "title", "name", "prompt"].iter()
+                .find_map(|k| input[*k].as_str().filter(|v| !v.trim().is_empty() && !v.contains('\n')))
                 .unwrap_or("").to_string(),
     };
     let first = summary.lines().next().unwrap_or("").to_string();
@@ -1688,8 +1773,7 @@ fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
         "Edit" => {
             let (a, d) = changed(&s("old_string"), &s("new_string"));
             set(vec![(s("file_path"), a, d, "edit")]);
-            item["old"] = Value::String(clip(&s("old_string"), 3000));
-            item["new"] = Value::String(clip(&s("new_string"), 3000));
+            diff_text(&mut item, Some(&s("old_string")), &s("new_string"));
         }
         "MultiEdit" => {
             let edits = input["edits"].as_array().cloned().unwrap_or_default();
@@ -1699,12 +1783,11 @@ fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
             });
             set(vec![(s("file_path"), a, d, "edit")]);
             let join = |k: &str| edits.iter().filter_map(|e| e[k].as_str()).collect::<Vec<_>>().join("\n⋯\n");
-            item["old"] = Value::String(clip(&join("old_string"), 3000));
-            item["new"] = Value::String(clip(&join("new_string"), 3000));
+            diff_text(&mut item, Some(&join("old_string")), &join("new_string"));
         }
         "Write" => {
             set(vec![(s("file_path"), s("content").lines().count(), 0, "write")]);
-            item["new"] = Value::String(clip(&s("content"), 3000));
+            diff_text(&mut item, None, &s("content"));
         }
         "NotebookEdit" => set(vec![(s("notebook_path"), s("new_source").lines().count(), 0, "edit")]),
         "AskUserQuestion" => {
@@ -1718,11 +1801,29 @@ fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
         "apply_patch" => {
             let patch = s("input");
             set(patch_files(&patch).into_iter().map(|(p, a, d, k)| (p, a, d, k)).collect());
-            item["patch"] = Value::String(clip(&patch, 6000));
+            let (text, cut) = clip_lines(&patch, 6000);
+            item["patch"] = Value::String(text);
+            if cut > 0 {
+                item["cut"] = json!(cut);
+            }
         }
         _ => {}
     }
     item
+}
+
+// The text on both sides of an edit, cut to 3000 characters; `cut` (only when something is left out) is how
+// many lines the longer side lost.
+fn diff_text(item: &mut Value, old: Option<&str>, new: &str) {
+    let (old, a) = old.map_or((None, 0), |o| { let (t, n) = clip_lines(o, 3000); (Some(t), n) });
+    let (new, b) = clip_lines(new, 3000);
+    if let Some(old) = old {
+        item["old"] = Value::String(old);
+    }
+    item["new"] = Value::String(new);
+    if a.max(b) > 0 {
+        item["cut"] = json!(a.max(b));
+    }
 }
 
 // Lines added and removed going from `old` to `new`, not counting what both share at the
@@ -1752,9 +1853,10 @@ fn patch_files(patch: &str) -> Vec<(String, usize, usize, &'static str)> {
         } else if let Some(p) = l.strip_prefix("*** Delete File: ") {
             out.push((p.trim().to_string(), 0, 0, "delete"));
         } else if let Some(f) = out.last_mut() {
-            if l.starts_with('+') && !l.starts_with("+++") {
+            // an apply_patch has no "---"/"+++" file header, so these start a line of content too
+            if l.starts_with('+') {
                 f.1 += 1;
-            } else if l.starts_with('-') && !l.starts_with("---") {
+            } else if l.starts_with('-') {
                 f.2 += 1;
             }
         }
@@ -1773,14 +1875,15 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
     let cache = CHANGES.get_or_init(Default::default);
     let cacheable = before.is_none() && matches!(tool, "claude" | "codex");
     let size = fs::metadata(path).map_or(0, |m| m.len());
-    let (mut at, mut files, mut made) = match cache.lock().unwrap().get(path) {
-        Some((at, files, made)) if cacheable && *at <= size => (*at, files.clone(), made.clone()),
-        _ => (0, Vec::new(), Vec::new()),
+    let (mut at, mut files, mut made, mut open) = match cache.lock().unwrap().get(path) {
+        Some((at, files, made, open)) if cacheable && *at <= size => (*at, files.clone(), made.clone(), open.clone()),
+        _ => (0, Vec::new(), Vec::new(), Vec::new()),
     };
     if at > 0 && tool == "claude" && rewind_after(path, at) {
         at = 0;
         files.clear();
         made.clear();
+        open.clear();
     }
     let from = at;
     let (items, end) = transcript_from(path, tool, at, false);
@@ -1788,10 +1891,44 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
         if before.is_some() && item["rec"].as_str() == before {
             break;
         }
+        // An edit the agent was refused or that failed changed nothing. One counted before its result was
+        // written (`open`) is taken back when the result, read later, says it failed.
+        if item["kind"] == "result" {
+            let id = item["id"].as_str().unwrap_or("");
+            if let Some(i) = open.iter().position(|(o, _, _)| o == id) {
+                let (_, edited, ts) = open.remove(i);
+                if item["error"] == true {
+                    for f in edited.as_array().into_iter().flatten() {
+                        let p = f["path"].as_str().unwrap_or("");
+                        if let Some(i) = files.iter().position(|x| x["path"] == p) {
+                            let x = &mut files[i];
+                            for k in ["add", "del"] {
+                                x[k] = json!(x[k].as_u64().unwrap_or(0).saturating_sub(f[k].as_u64().unwrap_or(0)));
+                            }
+                            x["edits"] = json!(x["edits"].as_u64().unwrap_or(0).saturating_sub(1));
+                            if x["edits"] == 0 {
+                                files.remove(i);
+                            }
+                        }
+                        if f["kind"] == "write" {
+                            made.retain(|m| !(m["path"] == p && m["at"] == ts));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if item["error"] == true {
+            continue;
+        }
+        let ts = item["ts"].as_u64().unwrap_or(0);
+        if item["files"].is_array() && item.get("result").is_none() {
+            open.push((item["id"].as_str().unwrap_or("").to_string(), item["files"].clone(), ts));
+        }
         for f in item["files"].as_array().into_iter().flatten() {
             let p = f["path"].as_str().unwrap_or("");
             if f["kind"] == "write" {
-                made_at(&mut made, p, item["ts"].as_u64().unwrap_or(0), "tool");
+                made_at(&mut made, p, ts, "tool");
             }
             let at = match files.iter().position(|x| x["path"] == p) {
                 Some(i) => i,
@@ -1823,7 +1960,7 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
         });
     }
     if cacheable {
-        cache.lock().unwrap().insert(path.to_path_buf(), (end, files.clone(), made.clone()));
+        cache.lock().unwrap().insert(path.to_path_buf(), (end, files.clone(), made.clone(), open));
     }
     let add: u64 = files.iter().map(|f| f["add"].as_u64().unwrap_or(0)).sum();
     let del: u64 = files.iter().map(|f| f["del"].as_u64().unwrap_or(0)).sum();
@@ -1831,7 +1968,9 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
     let repo = Path::new(&cwd).is_dir() && !repo_root(&cwd).is_empty();
     json!({"files": files, "add": add, "del": del, "repo": repo, "made": made_now(&made, &cwd)})
 }
-static CHANGES: OnceLock<Mutex<HashMap<PathBuf, (u64, Vec<Value>, Vec<Value>)>>> = OnceLock::new();
+// per file: where the last read ended, the files changed, the files made, and the edits counted before their result
+// was written (call id, files, time)
+static CHANGES: OnceLock<Mutex<HashMap<PathBuf, (u64, Vec<Value>, Vec<Value>, Vec<(String, Value, u64)>)>>> = OnceLock::new();
 
 fn made_at(made: &mut Vec<Value>, path: &str, at: u64, how: &str) {
     made.retain(|m| m["path"] != path);
@@ -2173,8 +2312,9 @@ fn computed_task(t: &str) -> Option<String> {
 // running / done / failed / stopped: what the notification says, else what the call's result says,
 // else whether the session's process reports its task as running (`listed`). While a process holds
 // the session (`held`: since when, 0 if not known), an agent whose file it wrote and whose turn has
-// not finished is still working: one step or one model call can take minutes. With no process, an
-// agent is running while its file was written in the last 120 s. `s`: its agent_summary.
+// not finished is still working: one step or one model call can take minutes. With no process
+// nothing is working, however recently the file was written (a crash or a reboot leaves fresh files
+// behind). `s`: its agent_summary.
 fn state_of(note: Option<&(String, String)>, result: Option<bool>, listed: bool, held: Option<u64>, path: &Path, s: &Value) -> &'static str {
     let ends_on_words = s["endsOnWords"] == true;
     if let Some((status, _)) = note {
@@ -2189,7 +2329,7 @@ fn state_of(note: Option<&(String, String)>, result: Option<bool>, listed: bool,
     }
     let working = match held {
         Some(since) => mtime_ms(path) >= since && s["finished"] != true,
-        None => now().saturating_sub(mtime_ms(path)) < 120_000,
+        None => false,
     };
     if listed || working {
         return "running";
@@ -2423,9 +2563,8 @@ fn read_agents(path: &Path, live: &LiveTasks) -> Value {
             None => match note(&task) {
                 Some(n) => if n.0 == "completed" { "done" } else if n.0 == "failed" { "failed" } else { "stopped" },
                 None if listed(&task, &call) => "running",
-                // held: running if that process wrote it; else written in the last 10 minutes
+                // held: running if that process wrote it; with no process, stopped however fresh its files
                 None if held.is_some_and(|since| latest >= since) => "running",
-                None if held.is_none() && now().saturating_sub(latest) < 600_000 => "running",
                 None => "stopped",
             },
         };
@@ -2572,6 +2711,34 @@ pub fn agent_digest(path: &Path, agent: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A Workflow step reads as what the workflow does, not as its script's first line (issue tacit#136).
+    #[test]
+    fn workflow_step_says_what_it_does() {
+        let script = "export const meta = {\n  name: 'review-changes',\n  description: 'Review changed files across dimensions',\n}\nphase('Review')";
+        let it = tool_item("Workflow", &json!({"script": script}), 0);
+        assert_eq!(it["summary"], "Review changed files across dimensions");
+        let it = tool_item("Workflow", &json!({"script": "export const meta = { name: \"only-a-name\" }"}), 0);
+        assert_eq!(it["summary"], "only-a-name");
+        let it = tool_item("Workflow", &json!({"name": "nightly-audit", "args": {"x": 1}}), 0);
+        assert_eq!(it["summary"], "nightly-audit");
+        let it = tool_item("Workflow", &json!({"script": "phase('x')"}), 0);
+        assert_eq!(it["summary"], "A workflow");
+        // a key named like the one wanted but longer is not it
+        let it = tool_item("Workflow", &json!({"script": "const meta = { filename: 'x.js', name: 'real' }"}), 0);
+        assert_eq!(it["summary"], "real");
+    }
+
+    // An unknown tool never shows a line of code as its summary: a naming field first, else a one-line value.
+    #[test]
+    fn unknown_tool_skips_code() {
+        let it = tool_item("SomeTool", &json!({"script": "line one\nline two", "title": "Make the thing"}), 0);
+        assert_eq!(it["summary"], "Make the thing");
+        let it = tool_item("SomeTool", &json!({"script": "line one\nline two", "target": "staging"}), 0);
+        assert_eq!(it["summary"], "", "a field that is not listed is not guessed at");
+        let it = tool_item("SomeTool", &json!({"script": "line one\nline two"}), 0);
+        assert_eq!(it["summary"], "");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agent-host-test-{}-{name}", std::process::id()));
@@ -2777,7 +2944,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // An agent's own background agent, in the middle of a step written just now: its parent's
+    // An agent's own background agent, in the middle of a step written just now in a live session: its parent's
     // "launched" result is not its end, so it is running; the parent's task notification ends it.
     // An agent's foreground agent ends on its result.
     #[test]
@@ -2802,7 +2969,7 @@ mod tests {
             fs::write(sub.join(format!("agent-{aid}.meta.json")), json!({"toolUseId": c, "parentAgentId": "ppp", "spawnDepth": 2}).to_string()).unwrap();
             fs::write(sub.join(format!("agent-{aid}.jsonl")), step.clone() + "\n").unwrap();
         }
-        let of = |id: &str| agents(&main)["agents"].as_array().unwrap().iter().find(|x| x["agent"] == id).unwrap().clone();
+        let of = |id: &str| agents_live(&main, &LiveTasks { running: HashSet::new(), alive: true })["agents"].as_array().unwrap().iter().find(|x| x["agent"] == id).unwrap().clone();
         let n = of("nnn");
         assert_eq!((n["state"].clone(), n["last"]["desc"].clone()), (json!("running"), json!("Building")), "launched, not ended");
         assert_eq!(of("fff")["state"], json!("done"), "foreground: its result");
@@ -2902,5 +3069,144 @@ mod tests {
         assert!(!is_narration(""));
         assert!(!is_narration("not base64 at all!"));
         assert!(!is_narration(&b64(&[0x12, 0x40, 0x01])));   // a length past the end
+    }
+
+    // A long result keeps its end, where a failing build says why, and a line says what is left out.
+    #[test]
+    fn long_result_keeps_head_and_tail() {
+        let long = format!("{}{}", "w".repeat(3000), "error: build failed");
+        let mut items = Vec::new();
+        attach(&mut items, &HashMap::new(), "t1", &json!(long), true, false);
+        let r = items[0]["result"].as_str().unwrap();
+        assert!(r.starts_with("www") && r.ends_with("error: build failed"), "{r}");
+        assert!(r.contains("… 2619 characters left out …"), "{r}");
+        assert!(r.chars().count() < 460);
+        assert_eq!(clip_result("short ünï", 400), "short ünï");
+        let multi = "é".repeat(1000);
+        assert!(clip_result(&multi, 400).ends_with('é'));
+    }
+
+    // A Codex command that exits non-zero is an error, in both output shapes a rollout holds.
+    #[test]
+    fn codex_exit_status_is_an_error() {
+        let rows = |out: Value| {
+            let mut items = Vec::new();
+            let mut calls = HashMap::new();
+            let call = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c1",
+                "arguments": json!({"command": ["bash", "-lc", "cargo test"]}).to_string()}});
+            let done = json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": out}});
+            codex_item(&call, &mut items, &mut calls, false);
+            codex_item(&done, &mut items, &mut calls, false);
+            assert_eq!(items.len(), 1, "{items:?}");
+            items[0]["error"].clone()
+        };
+        assert_eq!(rows(json!("Exit code: 1\nWall time: 0.2 seconds\nOutput:\nboom")), json!(true));
+        assert_eq!(rows(json!("Exit code: 0\nWall time: 0.2 seconds\nOutput:\nok")), json!(false));
+        assert_eq!(rows(json!(r#"{"output":"boom","metadata":{"exit_code":2,"duration_seconds":0.1}}"#)), json!(true));
+        assert_eq!(rows(json!(r#"{"output":"ok","metadata":{"exit_code":0,"duration_seconds":0.1}}"#)), json!(false));
+        assert_eq!(rows(json!("plain text, no status")), json!(false));
+    }
+
+    // A tool with no listed key has no detail: the first string of its input is an id as often as words.
+    #[test]
+    fn unknown_tool_has_no_guessed_summary() {
+        let t = tool_item("mcp__omnicord__send_message", &json!({"channel_id": "1234567890", "content": "hi"}), 0);
+        assert_eq!(t["summary"], json!(""));
+        let t = tool_item("TaskStop", &json!({"task_id": "b7x2k9"}), 0);
+        assert_eq!(t["summary"], json!(""));
+        let t = tool_item("mcp__x__fetch", &json!({"id": "7", "url": "https://example.com"}), 0);
+        assert_eq!(t["summary"], json!("https://example.com"));
+    }
+
+    // A large write or edit is cut to whole lines, with no "…" on the last, and says how many lines it lost.
+    #[test]
+    fn large_edit_says_what_was_cut() {
+        let body: String = (0..400).map(|i| format!("line number {i} of the file\n")).collect();
+        let t = tool_item("Write", &json!({"file_path": "/tmp/f.rs", "content": body}), 0);
+        let new = t["new"].as_str().unwrap();
+        assert!(!new.contains('…') && new.lines().all(|l| l.starts_with("line number ") && l.ends_with(" of the file")), "{new}");
+        assert_eq!(t["cut"].as_u64().unwrap() as usize + new.lines().count(), 400);
+        assert_eq!(t["stat"], json!("+400"));
+        assert!(t.get("old").is_none());
+        let t = tool_item("Edit", &json!({"file_path": "/tmp/f.rs", "old_string": "a\nb", "new_string": "a\nc"}), 0);
+        assert_eq!((t["old"].clone(), t["new"].clone(), t.get("cut").is_none()), (json!("a\nb"), json!("a\nc"), true));
+        let one = tool_item("Write", &json!({"file_path": "/tmp/m.js", "content": "x".repeat(5000)}), 0);
+        assert_eq!((one["new"].as_str().unwrap().len(), one["cut"].clone()), (3000, json!(1)));
+    }
+
+    // Lines that start with "--" or "++" in an edit are lines of the edit, not the diff's file header.
+    #[test]
+    fn dashed_lines_are_counted() {
+        let patch = "*** Begin Patch\n*** Update File: q.sql\n@@\n-- old comment\n+++i;\n context\n-x\n*** End Patch";
+        let f = patch_files(patch);
+        assert_eq!((f[0].1, f[0].2), (1, 2));
+        let mut items = Vec::new();
+        let mut calls = HashMap::new();
+        let v2 = json!({"payload": {"item": {"type": "FileChange", "status": "completed",
+            "changes": {"q.sql": {"type": "update", "unified_diff": "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++i;\n context\n"}}}}});
+        codex_v2_item(&v2, &mut items, &mut calls);
+        let t = &items[0];
+        assert_eq!(t["patch"].as_str().unwrap(), "*** Update File: q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++i;\n context\n");
+        assert_eq!(t["stat"], json!("+1 −1"));
+    }
+
+    // The changes record leaves out edits that were refused or failed, also when the refusal is read
+    // on a later call than the edit.
+    #[test]
+    fn refused_edits_are_not_changes() {
+        let dir = scratch("refused");
+        let file = dir.join("refused-test.jsonl");
+        let ts = "2026-10-25T00:00:00.000Z";
+        let call = |id: &str, name: &str, input: Value| json!({"type": "assistant", "timestamp": ts,
+            "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}).to_string();
+        let result = |id: &str, bad: bool| json!({"type": "user", "timestamp": ts,
+            "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "x", "is_error": bad}]}}).to_string();
+        let edit = |f: &str| json!({"file_path": f, "old_string": "a", "new_string": "b\nc"});
+        let mut lines = vec![
+            call("e1", "Edit", edit("/x/kept.toml")), result("e1", false),
+            call("e2", "Edit", edit("/x/denied.toml")), result("e2", true),
+            call("e3", "Edit", edit("/x/kept.toml")), result("e3", true),
+            call("w1", "Write", json!({"file_path": "/x/new.txt", "content": "one\ntwo"})),
+        ];
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let got = changes(&file, "claude", None);
+        let names: Vec<&str> = got["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert!(names.contains(&"/x/kept.toml") && names.contains(&"/x/new.txt") && !names.contains(&"/x/denied.toml"), "{names:?}");
+        let kept = got["files"].as_array().unwrap().iter().find(|f| f["path"] == "/x/kept.toml").unwrap().clone();
+        assert_eq!((kept["add"].clone(), kept["del"].clone(), kept["edits"].clone()), (json!(2), json!(1), json!(1)));
+        // the Write was counted when it was pending; its denial arrives on the next read
+        lines.clear();
+        lines.push(result("w1", true));
+        let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut f, (lines.join("\n") + "\n").as_bytes()).unwrap();
+        let got = changes(&file, "claude", None);
+        let names: Vec<&str> = got["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["/x/kept.toml"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // With no process holding the session (a crash, a reboot, the host stopped), a workflow or an agent whose
+    // files were written a moment ago is stopped, not running.
+    #[test]
+    fn nothing_runs_without_a_process() {
+        let dir = scratch("noproc");
+        let main = dir.join("no-process-test.jsonl");
+        let sub = dir.join("no-process-test/subagents");
+        let run = sub.join("workflows/run1");
+        fs::create_dir_all(&run).unwrap();
+        let ts = "2026-10-25T00:00:00.000Z";
+        let step = json!([{"type": "tool_use", "id": "s1", "name": "Bash", "input": {"command": "sleep 3000"}}]);
+        let line = json!({"type": "assistant", "timestamp": ts, "message": {"model": "m", "content": step}}).to_string() + "\n";
+        fs::write(&main, "").unwrap();
+        fs::write(sub.join("agent-fff.jsonl"), &line).unwrap();
+        fs::write(sub.join("agent-fff.meta.json"), json!({"agentType": "general-purpose", "toolUseId": "toolu_f"}).to_string()).unwrap();
+        fs::write(run.join("journal.jsonl"), json!({"type": "started", "agentId": "ggg", "label": "g"}).to_string() + "\n").unwrap();
+        fs::write(run.join("agent-ggg.jsonl"), &line).unwrap();
+        let v = agents_live(&main, &LiveTasks::default());
+        assert_eq!(v["agents"][0]["state"], json!("stopped"));
+        assert_eq!((v["workflows"][0]["state"].clone(), v["workflows"][0]["agents"][0]["state"].clone()), (json!("stopped"), json!("stopped")));
+        let v = agents_live(&main, &LiveTasks { running: HashSet::new(), alive: true });
+        assert_eq!(v["agents"][0]["state"], json!("running"), "the host's process is alive");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

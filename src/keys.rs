@@ -22,13 +22,26 @@ static KNOWN: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// The login keyring: "open", "locked", or "absent" when there is no Secret Service to ask.
 pub fn keyring() -> &'static str {
-    let out = run("busctl", &["--user", "get-property", "org.freedesktop.secrets", "/org/freedesktop/secrets/collection/login",
-                             "org.freedesktop.Secret.Collection", "Locked"], None, Duration::from_secs(5));
-    match out {
-        Some((true, o)) if o.trim() == "b false" => "open",
-        Some((true, o)) if o.trim() == "b true" => "locked",
-        _ => "absent",
+    keyring_by(|| run("busctl", &["--user", "get-property", "org.freedesktop.secrets", "/org/freedesktop/secrets/collection/login",
+                                  "org.freedesktop.Secret.Collection", "Locked"], None, Duration::from_secs(5)), Duration::from_millis(300))
+}
+
+// A bus that answers with an error is asked twice more, `pause` apart, before the keyring is called absent: right
+// after login the Secret Service may not be up yet, or the bus may fail once. No answer at all (the read timed out,
+// busctl is not there) is final.
+fn keyring_by(mut read: impl FnMut() -> Option<(bool, String)>, pause: Duration) -> &'static str {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(pause);
+        }
+        match read() {
+            Some((true, o)) if o.trim() == "b false" => return "open",
+            Some((true, o)) if o.trim() == "b true" => return "locked",
+            Some((false, _)) => {}
+            _ => break,
+        }
     }
+    "absent"
 }
 
 fn unlocked() -> Result<(), String> {
@@ -78,11 +91,21 @@ pub fn clear(id: &str) -> Result<(), String> {
     let mut args = vec!["clear"];
     args.extend(ATTRS);
     args.extend(["key", id]);
-    run("secret-tool", &args, None, Duration::from_secs(10)).map(|_| ()).ok_or("The keyring did not answer".into())
+    cleared(run("secret-tool", &args, None, Duration::from_secs(10)))
+}
+
+// secret-tool clear exits 0 when it deleted the key or found none: a failure exit means the keyring refused,
+// and the key is still in it.
+fn cleared(out: Option<(bool, String)>) -> Result<(), String> {
+    match out {
+        Some((true, _)) => Ok(()),
+        Some((false, _)) => Err("The keyring did not delete the key".into()),
+        None => Err("The keyring did not answer".into()),
+    }
 }
 
 /// What the provider says of the key: "ok", "refused" or "offline" (no answer, or one that says
-/// nothing about the key).
+/// nothing about the key: a rate limit or an outage answers so too).
 pub fn check(provider: &str, secret: &str) -> &'static str {
     if !well_formed(secret) {
         return "refused";
@@ -273,7 +296,8 @@ mod tests {
 
     #[test]
     fn masks_key_shapes_and_known_values() {
-        let s = "key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA1234 and AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9876";
+        // in pieces, so the source holds nothing shaped like a key
+        let s = concat!("key sk-ant-api03-", "AAAAAAAAAAAAAAAAAAAAAAAA1234 and AIza", "SyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9876");
         let r = redact(s);
         assert!(!r.contains("AAAAAAAAAAAAAAAAAAAA"), "{r}");
         assert!(r.contains("••••1234") && r.contains("••••9876"), "{r}");
@@ -287,10 +311,32 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_bus_is_asked_again_before_the_keyring_is_absent() {
+        let none = Duration::ZERO;
+        let mut answers = vec![Some((false, String::new())), Some((false, String::new())), Some((true, "b false\n".to_string()))].into_iter();
+        assert_eq!(keyring_by(|| answers.next().unwrap(), none), "open");
+        let mut answers = vec![Some((false, String::new())), Some((true, "b true\n".to_string()))].into_iter();
+        assert_eq!(keyring_by(|| answers.next().unwrap(), none), "locked");
+        let mut asked = 0;
+        assert_eq!(keyring_by(|| { asked += 1; Some((false, String::new())) }, none), "absent");
+        assert_eq!(asked, 3);
+        let mut asked = 0;
+        assert_eq!(keyring_by(|| { asked += 1; None }, none), "absent");
+        assert_eq!(asked, 1, "a read that timed out is not asked again");
+    }
+
+    #[test]
     fn well_formed_keys() {
         assert!(well_formed("sk-or-v1-0123456789abcdef"));
         assert!(!well_formed("has space 0123456789"));
         assert!(!well_formed("quote\"0123456789"));
         assert!(!well_formed("short"));
+    }
+
+    #[test]
+    fn a_refused_clear_is_an_error() {
+        assert_eq!(cleared(Some((true, String::new()))), Ok(()));
+        assert_eq!(cleared(Some((false, String::new()))), Err("The keyring did not delete the key".into()));
+        assert_eq!(cleared(None), Err("The keyring did not answer".into()));
     }
 }
