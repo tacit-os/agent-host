@@ -604,7 +604,10 @@ fn check_in(id: &str, fresh: bool) {
         if a.use_ == "key" {
             // nothing to sign in to: the key is asked of its provider again, which also lifts a refusal that was a hiccup
             if let Some(kid) = a.key.as_deref() {
-                if let Some((provider, secret)) = key_entry(&st().file, kid).and_then(|k| k["provider"].as_str().map(str::to_string)).zip(keys::lookup(kid).ok()) {
+                // a plain let, so the lock is let go here: in an if-let it would be held through the lookup and the
+                // check, and taken again below on the same thread for good
+                let provider = key_entry(&st().file, kid).and_then(|k| k["provider"].as_str().map(str::to_string));
+                if let Some((provider, secret)) = provider.zip(keys::lookup(kid).ok()) {
                     let state = keys::check(&provider, &secret);
                     note_key_check(&mut st().file, kid, state);
                 }
@@ -1660,5 +1663,24 @@ mod tests {
         let r = start(Some(&personal_id("claude")));
         assert!(r["model"].is_null() && r["effort"].is_null(), "the folder's model went to another account: {r}");
         assert_eq!(r["mode"], "plan");
+    }
+
+    #[test]
+    fn a_key_account_is_checked_without_locking_the_accounts_for_good() {
+        key_account("claude-keyed");
+        // an open keyring holding the key, and a provider that takes it: tests/fakes/keyring
+        let fakes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/keyring");
+        std::env::set_var("PATH", format!("{}:{}", fakes.display(), std::env::var("PATH").unwrap_or_default()));
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            check("claude-keyed");
+            let _ = done.send(());
+        });
+        if ended.recv_timeout(Duration::from_secs(20)).is_err() {
+            // the accounts lock is held for good, so every other test that reads it would hang too
+            eprintln!("checking a key account never ended: it took the accounts lock twice");
+            std::process::exit(1);
+        }
+        assert_eq!(key_entry(&st().file, "k-1").unwrap()["check"]["state"], "ok");
     }
 }

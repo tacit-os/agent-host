@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for busctl in accounts.rs's key-account test: the login keyring is open.
+echo 'b false'

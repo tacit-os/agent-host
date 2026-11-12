@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for curl in accounts.rs's key-account test: the provider takes the key.
+cat > /dev/null
+printf 200
