@@ -294,10 +294,11 @@ fn agent_command(agent: &str, account: Option<&str>) -> Result<Command, String> 
 }
 
 // `cmd` run in a systemd scope of its own with a memory cap, so one runaway agent cannot take the
-// machine with it.
+// machine with it. MemoryMax counts memory only: with no swap cap a session past MemoryHigh went on
+// into swap (a session reached 3 GB plus 9.2 GB of swap, 2026-11-12) until the whole desktop froze.
 fn in_scope(cmd: &Command, unit: &str) -> Command {
     let mut s = Command::new("systemd-run");
-    s.args(["--user", "--scope", "--quiet", "--collect", "-p", "MemoryHigh=3G", "-p", "MemoryMax=5G"])
+    s.args(["--user", "--scope", "--quiet", "--collect", "-p", "MemoryHigh=3G", "-p", "MemoryMax=5G", "-p", "MemorySwapMax=2G"])
         .arg(format!("--unit={unit}"))
         .arg("--")
         .arg(cmd.get_program())
