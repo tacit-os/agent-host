@@ -121,6 +121,10 @@ impl Login {
     }
 
     pub fn cancel(&self) {
+        // one that has ended has its last step (accounts.rs drops it then): the check below runs the CLI
+        if *self.run.ended.lock().unwrap() {
+            return;
+        }
         // a sign-in the CLI already saved is done, not cancelled (Try again would start a second one)
         let saved = self.run.settled.lock().unwrap().as_ref().and_then(|f| f());
         self.run.end(saved.unwrap_or(Step::Cancelled));
@@ -235,7 +239,7 @@ struct Run {
     tx: Mutex<Option<Sender<Step>>>,  // to the thread that calls `on`
     procs: Mutex<Vec<Arc<Proc>>>,
     input: Mutex<Input>,
-    url: Mutex<String>,  // the last Waiting's address
+    url: Mutex<String>,  // the page that shows the code: the last Waiting's address, or Claude Code's printed one
     settled: Mutex<Option<Box<dyn Fn() -> Option<Step> + Send>>>,  // Claude: Done if the CLI has already saved the sign-in
 }
 
@@ -607,11 +611,14 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec, share: &Path) -> Result<(), St
         if url_next || text.contains("If the browser didn't open, visit:") {
             let after = if url_next { line.as_str() } else { line.split_once("visit:").map_or("", |x| x.1) };
             match url_in(after) {
-                Some(url) => {
+                Some(manual) => {
                     url_next = false;
-                    let url = browser_url(&capture_read).unwrap_or(url);
+                    let url = browser_url(&capture_read).unwrap_or_else(|| manual.clone());
                     let opened = open(&spec_open, &url);
                     r.step(Step::Waiting { url, opened });
+                    // the automatic address is opened, but its page goes back to the CLI's localhost listener and
+                    // shows no code: a code to paste comes from the printed page, which Code steps point at
+                    *r.url.lock().unwrap() = manual;
                 }
                 None => url_next = !url_next,
             }
@@ -658,6 +665,9 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec, share: &Path) -> Result<(), St
             let until = Instant::now() + Duration::from_secs(3);
             while Instant::now() < until && !*r.ended.lock().unwrap() {
                 thread::sleep(Duration::from_millis(100));
+            }
+            if *r.ended.lock().unwrap() {
+                return;
             }
             if let Some(done) = s3() {
                 r.end(done);
@@ -1029,7 +1039,6 @@ fn opencode_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
     let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
     let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}")));
     let mut cmd = spec_command(spec, "opencode");
-    let v2 = crate::opencode_v2::major(&cmd) >= 2;
     cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
         .env("OPENCODE_SERVER_PASSWORD", &password).current_dir(crate::home())
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -1046,6 +1055,9 @@ fn opencode_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
     let (r, device, spec) = (run.clone(), spec.method == "device", spec.clone());
     thread::spawn(move || {
         let go = || -> Result<Step, String> {
+            // here, not in start: accounts.rs holds its lock across that, and a --version not read before (the first
+            // sign-in, or one after an update) runs the program, up to 15 s
+            let v2 = crate::opencode_v2::major(&spec_command(&spec, "opencode")) >= 2;
             ready.recv_timeout(Duration::from_secs(30)).map_err(|_| "opencode serve did not start".to_string())?;
             if v2 {
                 return opencode2_login(&r, &spec, port, &auth, &provider, device, code_tx, codes);
@@ -1063,25 +1075,32 @@ fn opencode_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
                     r.step(Step::Waiting { url, opened });
                 }
             }
-            let body = if by_code {
-                {
-                    let ended = r.ended.lock().unwrap();
-                    if *ended {
-                        return Err("This sign-in has ended".into());
-                    }
-                    *r.input.lock().unwrap() = Input::Codes(code_tx);
-                }
-                r.ask_code(None);
-                let code = codes.recv().map_err(|_| "This sign-in has ended".to_string())?;
-                *r.input.lock().unwrap() = Input::None;
-                json!({"method": idx, "code": code})
-            } else {
-                json!({"method": idx})
-            };
-            match http(port, &auth, "POST", &format!("{base}/callback"), Some(&body), None)? {
-                Value::Bool(true) => Ok(Step::Done { email: None, plan: None }),
-                _ => Err("opencode did not accept the sign-in".into()),
+            if !by_code {
+                return match http(port, &auth, "POST", &format!("{base}/callback"), Some(&json!({"method": idx})), None)? {
+                    Value::Bool(true) => Ok(Step::Done { email: None, plan: None }),
+                    _ => Err("opencode did not accept the sign-in".into()),
+                };
             }
+            {
+                let ended = r.ended.lock().unwrap();
+                if *ended {
+                    return Err("This sign-in has ended".into());
+                }
+                *r.input.lock().unwrap() = Input::Codes(code_tx);
+            }
+            r.ask_code(None);
+            // A refused code (false, or opencode's 400) is asked for again, as Claude's is: opencode keeps the sign-in
+            // it is waiting on until one goes through. A lost connection to opencode (http's "opencode: …") ends it.
+            loop {
+                let code = codes.recv().map_err(|_| "This sign-in has ended".to_string())?;
+                match http(port, &auth, "POST", &format!("{base}/callback"), Some(&json!({"method": idx, "code": code})), None) {
+                    Ok(Value::Bool(true)) => break,
+                    Err(e) if e.starts_with("opencode: ") => return Err(e),
+                    _ => r.ask_code(Some("opencode did not accept the code".into())),
+                }
+            }
+            *r.input.lock().unwrap() = Input::None;
+            Ok(Step::Done { email: None, plan: None })
         };
         let step = go().unwrap_or_else(Step::Failed);
         r.end(step);
@@ -1351,9 +1370,11 @@ fn key_shaped(w: &str) -> bool {
         || (w.len() >= 24 && w.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) && w.chars().any(|c| c.is_ascii_digit()))
 }
 
-// Error text from a CLI with key-shaped words masked.
+// Error text from a CLI with key-shaped words masked, to their last 4 characters (not bytes: a key the CLI masked
+// itself, "sk-ant-…ab", has a 3-byte one there, and slicing inside it panicked the thread that would end the sign-in).
 fn redact(s: &str) -> String {
-    s.split(' ').map(|w| if key_shaped(w) { format!("••••{}", &w[w.len().saturating_sub(4)..]) } else { w.to_string() })
+    let tail = |w: &str| w.char_indices().rev().nth(3).map_or(0, |(i, _)| i);
+    s.split(' ').map(|w| if key_shaped(w) { format!("••••{}", &w[tail(w)..]) } else { w.to_string() })
         .collect::<Vec<_>>().join(" ")
 }
 
@@ -1476,6 +1497,7 @@ mod tests {
         assert_eq!(code_in("Open https://x.ai/device on any device and enter code: AB12-CD34."), Some("AB12-CD34".into()));
         assert_eq!(code_in("Complete authorization in your browser."), None);
         assert_eq!(redact("refused sk-ant-api03-abcdefghijklmnop key"), "refused ••••mnop key");
+        assert_eq!(redact("refused sk-ant-…ab and sk-é"), "refused ••••-…ab and ••••sk-é");
         assert_eq!(agent_of(b"node\0/usr/bin/pi\0--mode\0rpc"), "pi");
         assert_eq!(agent_of(b"node\0/x/pi-login.mjs\0login\0openai-codex"), "pi");
         assert_eq!(agent_of(b"/usr/lib/node_modules/@openai/codex/vendor/codex\0app-server"), "codex");
@@ -1550,7 +1572,8 @@ mod tests {
         assert_eq!(active(), Some(("claude".into(), "test-claude".into())));
         assert!(login.code("").is_err());
         login.code("not-a-code").unwrap();
-        assert_eq!(next(&rx), Step::Code { url: CLAUDE_AUTO_URL.into(), message: Some("Invalid code. Please make sure the full code was copied.".into()) });
+        // the page a code to paste comes from is the printed one, not the automatic one opened
+        assert_eq!(next(&rx), Step::Code { url: CLAUDE_URL.into(), message: Some("Invalid code. Please make sure the full code was copied.".into()) });
         login.code("abc#def").unwrap();
         assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))]);
         assert_eq!(fs::read_to_string(out.join("claude.args")).unwrap(), "auth\nlogin\n--console\n");
@@ -1608,6 +1631,23 @@ mod tests {
         login.cancel();
         assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))], "Try again's cancel finds it finished");
         assert_eq!(active(), None);
+    }
+
+    // A sign-in that has ended asks the CLI nothing more: accounts.rs drops its Login at the last step, and that ran
+    // `claude auth status` again before the Done went out; the saved-sign-in watcher ran it too.
+    #[test]
+    fn a_finished_claude_sign_in_runs_no_more_status() {
+        let _s = serial();
+        let out = scratch("claude-finished");
+        let home = out.join("acct");
+        fs::create_dir_all(&home).unwrap();
+        let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "ok"), &out);
+        assert_eq!(rest(&rx).last(), Some(&done(Some("someone@example.com"), Some("max"))));
+        let asked = || fs::read_to_string(out.join("claude.statuses")).map_or(0, |s| s.lines().count());
+        assert_eq!(asked(), 1, "the one status the Done is read from");
+        drop(login);
+        thread::sleep(Duration::from_millis(400));
+        assert_eq!(asked(), 1, "asked again after the end");
     }
 
     #[test]
@@ -1880,9 +1920,14 @@ mod tests {
         let (login, rx) = begin(spec("opencode", "browser", Some("anthropic"), None, &out, "ok"), &out);
         assert_eq!(next(&rx), Step::Waiting { url: "https://claude.example/oauth".into(), opened: true });
         assert_eq!(next(&rx), Step::Code { url: "https://claude.example/oauth".into(), message: None }, "a code is the one way on");
+        // a refused code, answered false or with opencode's 400, is asked for again
+        for bad in ["bad#code", "refused#400"] {
+            login.code(bad).unwrap();
+            assert_eq!(next(&rx), Step::Code { url: "https://claude.example/oauth".into(), message: Some("opencode did not accept the code".into()) });
+        }
         login.code("good#code").unwrap();
         assert_eq!(rest(&rx), [done(None, None)]);
-        assert_eq!(calls(&out)[1]["body"], json!({"method": 1, "code": "good#code"}), "opencode numbers the api method too");
+        assert_eq!(calls(&out)[3]["body"], json!({"method": 1, "code": "good#code"}), "opencode numbers the api method too");
 
         let out = scratch("opencode-fail");
         let (_l, rx) = begin(spec("opencode", "browser", Some("openai"), None, &out, "fail"), &out);
@@ -1899,6 +1944,28 @@ mod tests {
         login.cancel();
         assert_eq!(rest(&rx), [Step::Cancelled]);
         assert!(gone(pid), "serve is killed on cancel while the callback waits");
+    }
+
+    // An opencode sign-in starts at once though `opencode --version` is slow: accounts.rs holds the accounts lock
+    // across start, and the version was read there on a binary not seen before.
+    #[test]
+    fn an_opencode_sign_in_starts_without_waiting_for_its_version() {
+        let _s = serial();
+        let out = scratch("opencode-slow-version");
+        // a binary of its own, so its version is not one read before, whose --version takes 2 s
+        let bin = out.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let slow = format!("#!/bin/sh\n[ \"$1\" = --version ] && sleep 2\nexec {} \"$@\"\n", fakes("bin").join("opencode").display());
+        fs::write(bin.join("opencode"), slow).unwrap();
+        fs::set_permissions(bin.join("opencode"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = spec("opencode", "browser", Some("openai"), None, &out, "ok");
+        for (_, v) in s.env.iter_mut().filter(|(k, _)| k == "PATH") {
+            *v = format!("{}:{v}", bin.display());
+        }
+        let t = Instant::now();
+        let (_l, rx) = begin(s, &out);
+        assert!(t.elapsed() < Duration::from_secs(1), "the start took {:?}", t.elapsed());
+        assert_eq!(rest(&rx).last(), Some(&done(None, None)));
     }
 
     #[test]

@@ -49,8 +49,18 @@ fn v2_gens() -> &'static Mutex<std::collections::HashSet<u64>> {
 
 // A path's query: the folder a session belongs to.
 fn dir_query(cwd: &str) -> String {
-    let mut q = String::from("?directory=");
-    for b in cwd.bytes() {
+    format!("?directory={}", escaped(cwd))
+}
+
+// An attached file as opencode reads it back (fileURLToPath): a '#', '?' or '%' left in the path cut it short or failed.
+fn file_url(path: &str) -> String {
+    format!("file://{}", escaped(path))
+}
+
+// `s` percent-encoded, but for letters, digits, '/' and -_.~
+fn escaped(s: &str) -> String {
+    let mut q = String::new();
+    for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
             q.push(b as char);
         } else {
@@ -146,18 +156,12 @@ fn server(shared: &Shared, account: Option<&str>) -> Result<Arc<Server>, String>
     let mut child = cmd.spawn().map_err(|e| format!("start opencode: {e}"))?;
     let (stdout, stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let (ready_tx, ready) = channel::<()>();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if line.contains("listening on") {
-                let _ = ready_tx.send(());
-            }
+    thread::spawn(move || crate::each_line(stdout, |line| {
+        if line.contains("listening on") {
+            let _ = ready_tx.send(());
         }
-    });
-    thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("[opencode] {}", crate::keys::redact(&line));
-        }
-    });
+    }));
+    thread::spawn(move || crate::each_line(stderr, |line| eprintln!("[opencode] {}", crate::keys::redact(&line))));
     let (tx, rx) = channel::<String>();
     if v2 {
         v2_gens().lock().unwrap().insert(gen);
@@ -574,7 +578,7 @@ fn prompt(shared: &Shared, id: &str, text: &str, images: &[String], files: &[Str
     let mut parts = vec![json!({"type": "text", "text": text})];
     for p in images.iter().chain(files) {
         let m = crate::image_type_of(p).unwrap_or_else(|| mime(p));
-        parts.push(json!({"type": "file", "mime": m, "filename": p.rsplit('/').next().unwrap_or(p), "url": format!("file://{p}")}));
+        parts.push(json!({"type": "file", "mime": m, "filename": p.rsplit('/').next().unwrap_or(p), "url": file_url(p)}));
     }
     let mut h = shared.lock().unwrap();
     let s = h.sessions.get(id).ok_or("no such session")?;
@@ -593,7 +597,7 @@ fn prompt(shared: &Shared, id: &str, text: &str, images: &[String], files: &[Str
 }
 
 fn prompt_v2(shared: &Shared, id: &str, text: &str, images: &[String], files: &[String]) -> Result<(), String> {
-    let attached: Vec<Value> = images.iter().chain(files).map(|p| json!({"uri": format!("file://{p}"), "name": p.rsplit('/').next().unwrap_or(p)})).collect();
+    let attached: Vec<Value> = images.iter().chain(files).map(|p| json!({"uri": file_url(p), "name": p.rsplit('/').next().unwrap_or(p)})).collect();
     let mut h = shared.lock().unwrap();
     let s = h.sessions.get(id).ok_or("no such session")?;
     let to = s.to_child.clone().ok_or("session is not open")?;
@@ -757,4 +761,36 @@ pub fn archive(shared: &Shared, id: &str) -> Result<(), String> {
         return srv.request("PATCH", &format!("/api/session/{id}"), Some(&json!({"archived": true}))).map(|_| ());
     }
     srv.request("PATCH", &format!("/session/{id}{}", dir_query(&cwd)), Some(&json!({"time": {"archived": now_ms()}}))).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Attached files whose names hold '#', '?', '%' or a space reach opencode as file URLs it reads back whole, on
+    // both 1's prompt_async and 2's prompt.
+    #[test]
+    fn attached_paths_are_escaped_in_their_urls() {
+        let id = "ses_0123456789abcdefghijklmnop";
+        let files = ["/home/me/C# notes.md".to_string(), "/home/me/what?.txt".to_string(), "/home/me/100%.txt".to_string()];
+        let want = ["file:///home/me/C%23%20notes.md", "file:///home/me/what%3F.txt", "file:///home/me/100%25.txt"];
+        for (gen, v2) in [(u64::MAX - 1, false), (u64::MAX - 2, true)] {
+            if v2 {
+                v2_gens().lock().unwrap().insert(gen);
+            }
+            let (tx, rx) = channel::<String>();
+            let mut s = Session::new(id, "/home/me", "opencode");
+            (s.gen, s.to_child) = (gen, Some(tx));
+            let shared: Shared = Arc::new(Mutex::new(Host::default()));
+            shared.lock().unwrap().sessions.insert(id.into(), s);
+            prompt(&shared, id, "read these", &[], &files).unwrap();
+            let sent: Vec<Value> = rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect();
+            let urls: Vec<&str> = if v2 {
+                sent.last().unwrap()["body"]["files"].as_array().unwrap().iter().map(|f| f["uri"].as_str().unwrap()).collect()
+            } else {
+                sent[0]["body"]["parts"].as_array().unwrap().iter().filter_map(|p| p["url"].as_str()).collect()
+            };
+            assert_eq!(urls, want, "opencode {}", if v2 { 2 } else { 1 });
+        }
+    }
 }

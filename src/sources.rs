@@ -267,21 +267,22 @@ pub(super) fn opencode_sessions() -> Option<Vec<Value>> {
 // The sessions among `ids` that are 2's.
 fn v2_ids(ids: &[String]) -> HashSet<String> {
     let list: Vec<String> = ids.iter().filter(|i| safe_id(i)).map(|i| format!("'{i}'")).collect();
-    if list.is_empty() || !tables().1 {
+    if list.is_empty() {
         return HashSet::new();
     }
+    // with no session_v2 table the query fails, which is none of them: no tables() first, a process less per poll
     query(&format!("select id from session_v2 where id in ({})", list.join(","))).iter().filter_map(|r| r["id"].as_str().map(str::to_string)).collect()
 }
 
 // 2's messages of these sessions, in order: session, message id, kind (user, assistant, compaction, …), time, and
-// the message as JSON.
-fn messages_v2(ids: &[String]) -> Option<Vec<Value>> {
+// the message as JSON. `from`: one session's, from its `from`th message on.
+fn messages_v2(ids: &[String], from: u64) -> Option<Vec<Value>> {
     let list: Vec<String> = ids.iter().filter(|i| safe_id(i)).map(|i| format!("'{i}'")).collect();
     if list.is_empty() {
         return Some(Vec::new());
     }
     try_query(&format!("select session_id s, id mid, type t, time_created c, data d from session_message \
-        where session_id in ({}) and type in ('user', 'assistant', 'compaction') order by session_id, seq", list.join(",")))
+        where session_id in ({}) and type in ('user', 'assistant', 'compaction') order by session_id, seq limit -1 offset {from}", list.join(",")))
 }
 
 // A message of 2's as items. `only_scan`: what the index needs, your words, the agent's words and the edits.
@@ -371,6 +372,17 @@ fn parts(ids: &[String], only_scan: bool) -> Option<Vec<Value>> {
     // the index needs your words, the agent's words and the edits
     let filter = if only_scan { " and (json_extract(p.data,'$.type') = 'text' or json_extract(p.data,'$.tool') in ('edit','write'))" } else { "" };
     try_query(&format!("{PARTS} where p.session_id in ({}){filter} order by p.session_id, m.time_created, m.id, p.id", list.join(",")))
+}
+
+// One session's parts from its `from`th message on, its messages counted as opencode_read counts them (those with
+// parts, in order): following a session reads what is new, not every part of it on every poll.
+fn parts_from(id: &str, from: u64) -> Option<Vec<Value>> {
+    if !safe_id(id) {
+        return Some(Vec::new());
+    }
+    try_query(&format!("{PARTS} where p.session_id = '{id}' and m.id in (select m2.id from message m2 join part p2 on p2.message_id = m2.id \
+        where p2.session_id = '{id}' group by m2.id order by m2.time_created, m2.id limit -1 offset {from}) \
+        order by p.session_id, m.time_created, m.id, p.id"))
 }
 
 // opencode's tools under Claude Code's names and input keys.
@@ -465,7 +477,7 @@ pub(super) fn opencode_scan(ids: &[String]) -> Option<HashMap<String, Vec<Value>
     let v2 = v2_ids(ids);
     let (ids2, ids): (Vec<String>, Vec<String>) = ids.iter().cloned().partition(|i| v2.contains(i));
     for chunk in ids2.chunks(200) {
-        for r in messages_v2(chunk)? {
+        for r in messages_v2(chunk, 0)? {
             let s = r["s"].as_str().unwrap_or("").to_string();
             oc2_items(&r, out.entry(s).or_default(), true);
         }
@@ -487,11 +499,11 @@ pub(super) fn opencode_read(key: &Path, from: u64) -> (Vec<Value>, u64) {
     if v2_ids(std::slice::from_ref(&id)).contains(&id) {
         return read_v2(&id, from);
     }
-    let rows = parts(&[id], false).unwrap_or_default();
+    let rows = parts_from(&id, from).unwrap_or_default();
     let newest = rows.last().and_then(|r| r["mid"].as_str()).unwrap_or("").to_string();
     let mut items = Vec::new();
     let mut calls = HashMap::new();
-    let mut n: u64 = 0;
+    let mut n: u64 = from;
     let mut mid = String::new();
     for r in rows {
         let m = r["mid"].as_str().unwrap_or("");
@@ -503,9 +515,6 @@ pub(super) fn opencode_read(key: &Path, from: u64) -> (Vec<Value>, u64) {
             if mid == newest && r["done"].as_i64() != Some(1) {
                 return (items, n.max(from));
             }
-        }
-        if n < from {
-            continue;
         }
         let first = items.len();
         oc_item(&r, &mut items, &mut calls);
@@ -519,15 +528,13 @@ pub(super) fn opencode_read(key: &Path, from: u64) -> (Vec<Value>, u64) {
 
 // 2's messages from the `from`th on, numbered as opencode_read numbers 1.x's.
 fn read_v2(id: &str, from: u64) -> (Vec<Value>, u64) {
-    let rows = messages_v2(&[id.to_string()]).unwrap_or_default();
+    let rows = messages_v2(&[id.to_string()], from).unwrap_or_default();
     let mut items = Vec::new();
     let last = rows.len();
-    for (n, r) in rows.iter().enumerate() {
-        if n + 1 == last && !done_v2(r) {
-            return (items, (n as u64).max(from));
-        }
-        if (n as u64) < from {
-            continue;
+    for (i, r) in rows.iter().enumerate() {
+        let n = from + i as u64;
+        if i + 1 == last && !done_v2(r) {
+            return (items, n);
         }
         let first = items.len();
         oc2_items(r, &mut items, false);
@@ -535,7 +542,7 @@ fn read_v2(id: &str, from: u64) -> (Vec<Value>, u64) {
             it["_at"] = json!(n);
         }
     }
-    (items, (last as u64).max(from))
+    (items, from + last as u64)
 }
 
 pub(super) fn opencode_cwd(key: &Path) -> String {
@@ -705,6 +712,18 @@ pub fn terminal_holder(id: &str) -> Option<u32> {
     holder_outside(id, 0)
 }
 
+// Whether `pid` runs in a scope agent-host started for session `id` (main's spawn names it agent-<the id's first 8
+// characters>-<host pid>-<n>): a turn a previous host's process is finishing, not a terminal.
+pub fn in_session_scope(pid: u32, id: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|c| session_scope(&c, id))
+}
+
+fn session_scope(cgroup: &str, id: &str) -> bool {
+    let Some(short) = id.get(..8) else { return false };
+    cgroup.lines().filter_map(|l| l.rsplit('/').next())
+        .any(|unit| unit.strip_prefix("agent-").and_then(|u| u.strip_prefix(short)).is_some_and(|u| u.starts_with('-') && u.ends_with(".scope")))
+}
+
 // Whether `pid` is `ancestor` or runs beneath it.
 fn runs_under(pid: u32, ancestor: u32) -> bool {
     let mut at = pid;
@@ -787,45 +806,50 @@ fn ms(t: std::io::Result<std::time::SystemTime>) -> u64 {
     t.ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
 }
 
-const SKIP: [&str; 3] = ["node_modules", "target", "build"];
+const SKIP: [&str; 5] = ["node_modules", "target", "build", "venv", "__pycache__"];
 
 // Files under `cwd` written since `since_ms`: what a turn made besides its tool-named writes.
-// Three folders deep, past no hidden folder or build output, 5000 entries at most; in the home
-// folder only Documents, Pictures, Downloads and Videos.
+// Three folders deep, past no hidden folder, build output or Python cache, 5000 entries at most; in
+// the home folder only Documents, Pictures, Downloads and Videos. Folders are read in this order:
+// those that gained or lost an entry during the turn (their time is `since` or later), then the
+// smallest (a folder's size grows with its entries), so a large folder of old files cannot use up
+// the 5000 before the folder the turn wrote into is reached.
 pub fn sweep_made(cwd: &str, since_ms: u64) -> Vec<Value> {
-    fn walk(dir: &Path, depth: u32, since: u64, budget: &mut usize, out: &mut Vec<Value>) {
-        for p in list_dir(dir) {
-            if *budget == 0 {
-                return;
+    use std::cmp::Reverse;
+    let home = home();
+    let mut out = Vec::new();
+    if cwd.is_empty() {
+        return out;
+    }
+    let roots: Vec<(PathBuf, u32)> = if Path::new(cwd) == home {
+        ["Documents", "Pictures", "Downloads", "Videos"].iter().map(|d| (home.join(d), 2)).collect()
+    } else {
+        vec![(PathBuf::from(cwd), 3)]
+    };
+    // (unchanged since the turn began, size, the folder, how deep under it to go), the least first
+    let mut queue: std::collections::BinaryHeap<Reverse<(bool, u64, PathBuf, u32)>> =
+        roots.into_iter().map(|(p, depth)| Reverse((false, 0, p, depth))).collect();
+    let mut budget = 5000;
+    while let Some(Reverse((_, _, dir, depth))) = queue.pop().filter(|_| budget > 0) {
+        for p in list_dir(&dir) {
+            if budget == 0 {
+                break;
             }
-            *budget -= 1;
+            budget -= 1;
             let Ok(m) = fs::symlink_metadata(&p) else { continue };
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if m.is_dir() {
                 if depth > 0 && !name.starts_with('.') && !SKIP.contains(&name.as_str()) {
-                    walk(&p, depth - 1, since, budget, out);
+                    queue.push(Reverse((ms(m.modified()) < since_ms, m.len(), p, depth - 1)));
                 }
             } else if m.is_file() {
                 let at = ms(m.modified());
-                if at >= since {
+                if at >= since_ms {
                     let path = p.to_string_lossy().into_owned();
                     out.push(json!({"path": path, "kind": kind_of(&path), "size": m.len(), "at": at, "how": "sweep"}));
                 }
             }
         }
-    }
-    let home = home();
-    let mut out = Vec::new();
-    let mut budget = 5000;
-    if cwd.is_empty() {
-        return out;
-    }
-    if Path::new(cwd) == home {
-        for d in ["Documents", "Pictures", "Downloads", "Videos"] {
-            walk(&home.join(d), 2, since_ms, &mut budget, &mut out);
-        }
-    } else {
-        walk(Path::new(cwd), 3, since_ms, &mut budget, &mut out);
     }
     out.sort_by(|a, b| b["at"].as_u64().cmp(&a["at"].as_u64()));
     out
@@ -880,5 +904,97 @@ mod tests {
         assert_eq!(trash_session_with("claude", "abc-1", &file, &refuse), Err("no".to_string()), "the transcript failing is a failure");
         assert!(trash_session_with("claude", "other", &file, &trash).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Following an opencode session reads it from the message the app is on, with the items and numbers the whole
+    // reading gives, on 1.x's tables and 2's. Nothing before that is read: an earlier part sqlite cannot read stands for
+    // the work the whole reading did on every poll. (No `session` row, and 2's session has a parent, so the session
+    // list of other tests leaves them out.)
+    #[test]
+    fn following_an_opencode_session_reads_what_is_new() {
+        let _db = crate::tests::opencode_db_lock();
+        crate::tests::scratch_home();
+        let db = opencode_db();
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let sql = |q: &str| assert!(Command::new("sqlite3").arg(&db).arg(q).status().unwrap().success(), "{q}");
+        sql("create table if not exists message (id text primary key, session_id text, time_created integer, data text); \
+             create table if not exists part (id text primary key, message_id text, session_id text, time_created integer, data text); \
+             create table if not exists session_v2 (id text primary key, directory text, title text, time_created integer, \
+                 time_updated integer, parent_id text, time_archived integer, metadata text); \
+             create table if not exists session_message (id text primary key, session_id text, seq integer, type text, \
+                 time_created integer, data text);");
+        // 1.x: a turn with a tool, a message with no parts (not counted), and a turn still being written
+        let v1 = [("f1", 1000, r#"{"role":"user"}"#, vec![r#"{"type":"text","text":"first ask"}"#]),
+                  ("f2", 1001, r#"{"role":"assistant","time":{"completed":2}}"#,
+                   vec![r#"{"type":"text","text":"first answer"}"#, r#"{"type":"tool","tool":"bash","callID":"c1","state":{"status":"completed","input":{"command":"ls"},"output":"a b"}}"#]),
+                  ("f3", 1002, r#"{"role":"assistant","time":{"completed":3}}"#, vec![]),
+                  ("f4", 1003, r#"{"role":"user"}"#, vec![r#"{"type":"text","text":"second ask"}"#]),
+                  ("f5", 1004, r#"{"role":"assistant"}"#, vec![r#"{"type":"text","text":"writing"}"#])];
+        for (m, t, data, parts) in &v1 {
+            sql(&format!("insert or replace into message values ('msg_{m}', 'ses_follow1', {t}, '{data}')"));
+            for (i, p) in parts.iter().enumerate() {
+                sql(&format!("insert or replace into part values ('prt_{m}{i}', 'msg_{m}', 'ses_follow1', {t}, '{p}')"));
+            }
+        }
+        // 2: the same shape, and a kind the reading leaves out
+        sql("insert or replace into session_v2 (id, directory, parent_id) values ('ses_follow2', '/tmp', 'ses_other')");
+        let v2 = [(1, "user", r#"{"text":"first ask"}"#), (2, "assistant", r#"{"time":{"completed":2},"content":[{"type":"text","text":"first answer"}]}"#),
+                  (3, "step", "{}"), (4, "user", r#"{"text":"second ask"}"#), (5, "assistant", r#"{"content":[{"type":"text","text":"writing"}]}"#)];
+        for (seq, kind, data) in v2 {
+            sql(&format!("insert or replace into session_message values ('msg_g{seq}', 'ses_follow2', {seq}, '{kind}', {}, '{data}')", 1000 + seq));
+        }
+        for (id, items) in [("ses_follow1", 4), ("ses_follow2", 3)] {
+            let key = opencode_key(id);
+            let (all, next) = opencode_read(&key, 0);
+            assert_eq!((all.len(), next), (items, 3), "{id}: three messages read, the fourth still being written");
+            for from in 0..=5 {
+                let want: Vec<Value> = all.iter().filter(|i| i["_at"].as_u64().unwrap() >= from).cloned().collect();
+                assert_eq!(opencode_read(&key, from), (want, next.max(from)), "{id} from {from}");
+            }
+        }
+        let key = opencode_key("ses_follow1");
+        let (want, _) = opencode_read(&key, 1);
+        sql("insert or replace into part values ('prt_f0bad', 'msg_f1', 'ses_follow1', 1000, 'not json')");
+        assert_eq!((opencode_read(&key, 1).0.len(), want.len()), (3, 3), "the first message is not read again");
+        sql("delete from part where session_id = 'ses_follow1'; delete from message where session_id = 'ses_follow1'; \
+             delete from session_message where session_id = 'ses_follow2'; delete from session_v2 where id = 'ses_follow2'");
+    }
+
+    // A file the turn wrote is found past a large folder of old files: the sweep read folders in listing order with
+    // one budget of 5000 entries, and such a folder listed first used it up. A new file in a venv or a Python cache is
+    // nothing the turn made for you.
+    #[test]
+    fn a_new_file_is_found_past_a_large_old_folder() {
+        let dir = std::env::temp_dir().join(format!("agent-host-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // made first, so a listing newest first (tmpfs) has the large folder before it
+        for d in ["reports/2026", "venv", "tools/__pycache__", "data"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        for i in 0..6000 {
+            fs::write(dir.join(format!("data/{i}.csv")), "").unwrap();
+        }
+        // file times come from a coarse clock: a pause on each side of the turn's start
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let since = ms(Ok(std::time::SystemTime::now()));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for f in ["reports/2026/summary.md", "venv/pyvenv.cfg", "tools/__pycache__/x.cpython-314.pyc"] {
+            fs::write(dir.join(f), "new").unwrap();
+        }
+        let made = sweep_made(&dir.to_string_lossy(), since);
+        let _ = fs::remove_dir_all(&dir);
+        let names: Vec<&str> = made.iter().map(|m| m["path"].as_str().unwrap().rsplit('/').next().unwrap()).collect();
+        assert_eq!(names, ["summary.md"]);
+    }
+
+    #[test]
+    fn a_session_scope_is_the_one_spawn_names() {
+        let slice = "0::/user.slice/user-1000.slice/user@1000.service/app.slice";
+        let id = "7f880686-1111-4000-8000-000000000000";
+        assert!(session_scope(&format!("{slice}/agent-7f880686-86042-48.scope\n"), id));
+        assert!(!session_scope(&format!("{slice}/agent-4a0f1c2e-86042-48.scope"), id), "another session's");
+        assert!(!session_scope(&format!("{slice}/app-kitty-1234.scope"), id), "a terminal's");
+        assert!(!session_scope(&format!("{slice}/agent-7f8806861-86042-48.scope"), id));
+        assert!(!session_scope(&format!("{slice}/agent-7f880686-86042-48.scope"), "short"));
     }
 }

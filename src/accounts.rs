@@ -300,13 +300,21 @@ fn spawn_env(agent: &str, account: Option<&str>, with_keys: bool) -> Result<Spaw
 /// An agent's command for an account (None: Personal), its env scrubbed and the account's added.
 /// With it, Claude Code's key for fd 3. Err: a key it needs cannot be read (the keyring is locked).
 pub fn command_with(agent: &str, account: Option<&str>) -> Result<(Command, Option<String>), String> {
-    let sp = spawn_env(agent, account, true)?;
+    keys_for(agent, account).map(|sp| command_from(agent, sp))
+}
+
+/// What command_with reads from the keyring, which can take seconds: the host reads it before taking its lock.
+pub fn keys_for(agent: &str, account: Option<&str>) -> Result<Spawn, String> {
+    spawn_env(agent, account, true)
+}
+
+pub fn command_from(agent: &str, sp: Spawn) -> (Command, Option<String>) {
     let mut cmd = signin::command(agent, sp.home.as_deref(), &sp.env, agent);
     cmd.args(&sp.args);
     if sp.fd3.is_some() {
         cmd.env("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "3");
     }
-    Ok((cmd, sp.fd3))
+    (cmd, sp.fd3)
 }
 
 pub fn command(agent: &str, account: Option<&str>) -> Result<Command, String> {
@@ -1810,5 +1818,52 @@ mod tests {
             std::process::exit(1);
         }
         assert_eq!(key_entry(&st().file, "k-1").unwrap()["check"]["state"], "ok");
+    }
+
+    // A start on a key account reads its key before the host's lock is taken (main.rs keys_ahead), once: while a
+    // slow keyring answered, every session's output, client and permission answer waited on that lock.
+    #[test]
+    fn a_start_reads_its_key_outside_the_hosts_lock() {
+        use std::io::{BufRead, BufReader};
+        let home = crate::tests::scratch_home();
+        // key_account first: it adds k-1, which the other key-account test needs, only to an empty list
+        let dir = key_account("claude-gated");
+        {
+            let mut s = st();
+            s.file["keys"].as_array_mut().unwrap().push(json!({"id": "k-gated", "provider": "anthropic", "label": "Slow", "last4": "0000", "use": []}));
+            let a = Acct { id: "claude-gated".into(), agent: "claude".into(), label: "Slow".into(), personal: false, home: Some(dir),
+                           use_: "key".into(), key: Some("k-gated".into()) };
+            set_entry(&mut s.file, &a);
+        }
+        // tests/fakes/keyring: an open keyring that answers for k-gated once let go, and has no such key (so no
+        // claude is started)
+        let fakes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/keyring");
+        std::env::set_var("PATH", format!("{}:{}", fakes.display(), std::env::var("PATH").unwrap_or_default()));
+        let (asked, go) = (home.join("k-gated.asked"), home.join("k-gated.go"));
+        let shared: crate::Shared = std::sync::Arc::new(Mutex::new(crate::Host::default()));
+        let past: crate::Past = std::sync::Arc::new(Mutex::new(crate::History::default()));
+        let (mut client, end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (sh, pa) = (shared.clone(), past.clone());
+        thread::spawn(move || crate::serve(sh, pa, end));
+        writeln!(client, "{}", json!({"op": "start", "cwd": home, "account": "claude-gated", "tag": "gated"})).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        while !asked.exists() {
+            assert!(Instant::now() < until, "the key was never looked up");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let free = shared.try_lock().is_ok();
+        fs::write(&go, "").unwrap();
+        let mut lines = BufReader::new(client).lines();
+        let reply = loop {
+            let v: Value = serde_json::from_str(&lines.next().expect("a reply").unwrap()).unwrap();
+            if v["tag"] == "gated" {
+                break v;
+            }
+        };
+        let lookups = fs::read_to_string(&asked).unwrap().lines().count();
+        let _ = (fs::remove_file(&asked), fs::remove_file(&go));
+        assert!(free, "the host's lock was held while the keyring was asked");
+        assert_eq!((reply["message"].as_str(), lookups), (Some("No Anthropic key"), 1));
+        assert!(shared.lock().unwrap().sessions.is_empty());
     }
 }

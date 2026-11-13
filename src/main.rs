@@ -218,9 +218,12 @@ struct Host {
     // control requests whose answer goes back to the client that asked (rewind, side_question):
     // request id -> (client, its tag, session)
     replies: HashMap<String, (u64, Value, String)>,
+    // the keys the request being handled will start a process with, read before the lock (keys_ahead)
+    ready: Option<Ready>,
 }
 
 type Shared = Arc<Mutex<Host>>;
+type Ready = (&'static str, Option<String>, Result<accounts::Spawn, String>); // agent, account, its keys
 type Past = Arc<Mutex<History>>;
 
 impl Host {
@@ -311,6 +314,38 @@ fn agent_command(agent: &str, account: Option<&str>) -> Result<Command, String> 
     accounts::command(agent, account)
 }
 
+// A session's process command (accounts::command_with), from the keys keys_ahead read when they are its agent's
+// and account's.
+fn session_command(h: &mut Host, agent: &str, account: Option<&str>) -> Result<(Command, Option<String>), String> {
+    match h.ready.take() {
+        Some((a, acct, keys)) if a == agent && acct.as_deref() == account => keys.map(|sp| accounts::command_from(agent, sp)),
+        _ => accounts::command_with(agent, account),
+    }
+}
+
+// The keys a request that starts a Claude Code or pi process will need, read before the host's lock is taken: the
+// keyring can take seconds to answer (busctl, then secret-tool, for every key), and every session's output, client
+// and permission answer waits on that lock. None: the request starts no process.
+fn keys_ahead(shared: &Shared, req: &Value, tool: Option<&'static str>) -> Option<Ready> {
+    let agent = tool.filter(|t| matches!(*t, "claude" | "pi"))?;
+    let op = req["op"].as_str().unwrap_or("");
+    if !matches!(op, "start" | "send" | "rewind" | "rewind_files" | "side_question" | "settings") {
+        return None;
+    }
+    let id = if op == "start" { req["resume"].as_str().or(req["id"].as_str()) } else { req["id"].as_str() };
+    // a start's account replaces the session's (take_requests)
+    let asked = req["account"].as_str().filter(|_| op == "start").map(str::to_string);
+    let live = id.and_then(|id| shared.lock().unwrap().sessions.get(id).map(|s| (s.to_child.is_some() || s.pid != 0, s.account.clone())));
+    let account = match live {
+        Some((true, _)) => return None, // its process runs, or is still closing: nothing is started
+        Some((false, had)) => asked.or(had),
+        None if op == "start" => asked,
+        None => return None,
+    };
+    let keys = accounts::keys_for(agent, account.as_deref());
+    Some((agent, account, keys))
+}
+
 // `cmd` run in a systemd scope of its own with a memory cap, so one runaway agent cannot take the
 // machine with it. MemoryMax counts memory only: with no swap cap a session past MemoryHigh went on
 // into swap (a session reached 3 GB plus 9.2 GB of swap, 2026-11-12) until the whole desktop froze.
@@ -348,8 +383,9 @@ fn spawn(shared: &Shared, h: &mut Host, id: &str) -> Result<(), String> {
     }
     h.next_gen += 1;
     let gen = h.next_gen;
+    let account = h.sessions.get(id).ok_or("no such session")?.account.clone();
+    let (mut cmd, key) = session_command(h, "claude", account.as_deref())?;
     let s = h.sessions.get_mut(id).ok_or("no such session")?;
-    let (mut cmd, key) = accounts::command_with("claude", s.account.as_deref())?;
     cmd.args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
               "--include-partial-messages", "--replay-user-messages", "--permission-prompt-tool", "stdio",
               // bypassPermissions as a choice, not the default: without it a live switch to Full access is refused
@@ -428,12 +464,23 @@ fn write_in(mut stdin: ChildStdin, id: &str) -> Sender<String> {
     tx
 }
 
-fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut child: Child) {
-    for line in BufReader::new(out).lines() {
-        let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        on_event(&mut shared.lock().unwrap(), &id, gen, v);
+// Each line of `r` until it ends, a byte that is not UTF-8 read as U+FFFD. BufRead::lines() fails on such a line,
+// and a reader that stopped there left the process writing into a pipe nobody drained.
+fn each_line(r: impl std::io::Read, mut f: impl FnMut(String)) {
+    let mut r = BufReader::new(r);
+    let mut buf = Vec::new();
+    while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+        f(String::from_utf8_lossy(&buf).trim_end_matches(['\n', '\r']).to_string());
+        buf.clear();
     }
+}
+
+fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut child: Child) {
+    each_line(out, |line| {
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            on_event(&mut shared.lock().unwrap(), &id, gen, v);
+        }
+    });
     let code = child.wait().ok().and_then(|s| s.code());
     let mut h = shared.lock().unwrap();
     // The exit code alone misleads: after an interrupted turn, closing stdin exits with 1.
@@ -478,8 +525,7 @@ fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut 
 }
 
 fn read_err(shared: Shared, id: String, gen: u64, err: ChildStderr) {
-    for line in BufReader::new(err).lines() {
-        let Ok(line) = line else { break };
+    each_line(err, |line| {
         let line = keys::redact(&line).into_owned();
         eprintln!("[{}] {line}", &id[..8]);
         let mut h = shared.lock().unwrap();
@@ -492,7 +538,7 @@ fn read_err(shared: Shared, id: String, gen: u64, err: ChildStderr) {
                 s.stderr.pop_front();
             }
         }
-    }
+    });
 }
 
 // A line of a session's own process: Claude Code's are relayed as they are, pi's translated.
@@ -1251,12 +1297,15 @@ fn serve(shared: Shared, past: Past, stream: UnixStream) {
             });
             continue;
         }
+        let ready = keys_ahead(&shared, &req, tool);
         let mut h = shared.lock().unwrap();
+        h.ready = ready;
         let mut reply = if req.is_object() {
             handle(&shared, &mut h, cid, &req, tool).unwrap_or_else(|e| json!({"ev": "error", "message": e}))
         } else {
             json!({"ev": "error", "message": "not a JSON object"})
         };
+        h.ready = None; // keys nothing started with are not kept
         // a request answered later (rewind, side_question) sends its reply then
         if reply["ev"] == "deferred" {
             continue;
@@ -1348,9 +1397,13 @@ fn fork(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
             s.fork_from = Some(from.to_string());
             (s.mode_req, s.model_req, s.account) = (mode, model, account);
             take_requests(&mut s, req);
+            let ready = ("claude", s.account.clone(), accounts::keys_for("claude", s.account.as_deref()));
             let mut h = shared.lock().unwrap();
             h.sessions.insert(id.clone(), s);
-            if let Err(e) = spawn(shared, &mut h, &id) {
+            h.ready = Some(ready);
+            let started = spawn(shared, &mut h, &id);
+            h.ready = None;
+            if let Err(e) = started {
                 h.sessions.remove(&id);
                 return Err(e);
             }
@@ -1362,14 +1415,20 @@ fn fork(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
     Ok(json!({"ev": "forked", "id": id, "from": from, "tool": tool}))
 }
 
+// Why a delete is refused while process `pid` has the session open: a terminal, or the process a previous host
+// started, whose turn Praxis follows until it ends (Host.qml's leftovers), in Praxis's words for it.
+fn held_by(pid: u32, id: &str) -> String {
+    if history::in_session_scope(pid, id) { "Still finishing a turn from before the background service restarted".into() } else { "Open in a terminal".into() }
+}
+
 // A session gone from the app: Claude Code's and pi's files to the Trash; Codex and opencode keep
 // theirs, archived (their own way of hiding a session, which can be undone in them).
 fn delete(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
     let id = req["id"].as_str().ok_or("delete needs an id")?;
     // refused before anything is stopped: a terminal that has the session open (the host's own process for it is not one)
     let own = shared.lock().unwrap().sessions.get(id).map_or(0, |s| s.pid);
-    if history::holder_outside(id, own).is_some() {
-        return Err("Open in a terminal".into());
+    if let Some(pid) = history::holder_outside(id, own) {
+        return Err(held_by(pid, id));
     }
     // a live session is closed first (a running Codex or opencode turn is stopped), and its process
     // waited for, so nothing writes its files after they have gone
@@ -1393,8 +1452,8 @@ fn delete(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
             thread::sleep(Duration::from_millis(100));
         }
     }
-    if history::terminal_holder(id).is_some() {
-        return Err("Open in a terminal".into());
+    if let Some(pid) = history::terminal_holder(id) {
+        return Err(held_by(pid, id));
     }
     let located = locate(past, id);
     let tool = live.or(located.as_ref().ok().map(|l| l.1)).ok_or(format!("no transcript for {id}"))?;
@@ -1781,6 +1840,12 @@ mod tests {
         .clone()
     }
 
+    // The opencode database under scratch_home, for the tests that write it: one at a time, or sqlite refuses one.
+    pub(crate) fn opencode_db_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_start_that_cannot_spawn_leaves_no_session() {
         let home = scratch_home();
@@ -1820,6 +1885,51 @@ mod tests {
         assert_eq!(r.unwrap_err(), "Open in a terminal");
         let h = shared.lock().unwrap();
         assert!(h.sessions[id].to_child.is_some(), "the refused delete closed the session's process");
+    }
+
+    // A line that is not UTF-8 is read on past, on stdout and on stderr: the readers ended at it, the process's
+    // pipes were no longer drained, and the session was never seen to exit.
+    #[test]
+    fn a_line_that_is_not_utf8_is_read_on_past() {
+        let id = "4a0f1c2e-0000-4000-8000-00000000d004";
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let mut s = Session::new(id, "/", "claude");
+        (s.gen, s.pid) = (1, 1);
+        shared.lock().unwrap().sessions.insert(id.into(), s);
+        let mut child = Command::new("sh").args(["-c", r"printf 'bad \377 byte\nlater\n' >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+        read_err(shared.clone(), id.into(), 1, child.stderr.take().unwrap());
+        let out = b"\xff not json\n{\"type\": \"system\", \"subtype\": \"init\", \"model\": \"after-the-bad-line\"}\n";
+        read_out(shared.clone(), id.into(), 1, &out[..], child);
+        let h = shared.lock().unwrap();
+        let s = &h.sessions[id];
+        assert_eq!(s.model, "after-the-bad-line");
+        assert_eq!((s.pid, s.stderr.iter().cloned().collect::<Vec<_>>()), (0, vec!["bad \u{FFFD} byte".to_string(), "later".to_string()]));
+    }
+
+    // A delete refused for the process a previous host started for the session, still finishing its turn, says so
+    // instead of "Open in a terminal". That process runs in the session's own agent scope, and the holder here is a
+    // child of the test, in the test's scope: the leftover half runs only where the test runs in an agent-host scope
+    // (from Praxis); from a terminal only the terminal half does.
+    #[test]
+    fn a_previous_hosts_turn_is_not_called_a_terminal() {
+        let home = scratch_home();
+        let past: Past = Arc::new(Mutex::new(History::default()));
+        let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let scope = cgroup.trim().rsplit('/').next().and_then(|u| u.strip_prefix("agent-")).and_then(|u| u.get(..8))
+            .filter(|s| s.chars().all(|c| c.is_ascii_hexdigit())).map(str::to_string);
+        let mut cases = vec![("4a0f1c2e-0000-4000-8000-00000000d005".to_string(), "Open in a terminal")];
+        if let Some(short) = scope {
+            cases.push((format!("{short}-0000-4000-8000-00000000d005"), "Still finishing a turn from before the background service restarted"));
+        }
+        for (id, said) in cases {
+            let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+            hold(&home, &id, child.id());
+            let shared: Shared = Arc::new(Mutex::new(Host::default()));
+            let r = delete(&shared, &past, &json!({"op": "delete", "id": id}));
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(r.unwrap_err(), said);
+        }
     }
 
     #[test]

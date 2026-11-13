@@ -63,9 +63,12 @@ fn detect_in(agent: &str, path: &str, home: &Path) -> Detected {
     let Some(bin) = find(agent, path) else {
         return Detected { installed: false, version: String::new(), route: "none", path: None };
     };
-    let root_owned = fs::symlink_metadata(&bin).is_ok_and(|m| m.uid() == 0);
-    let route = if bin.starts_with(home) && !root_owned { "user" } else { "system" };
-    Detected { installed: true, version: version_of(&bin, path), route, path: Some(bin) }
+    Detected { installed: true, version: version_of(&bin, path), route: route_of(&bin, home), path: Some(bin) }
+}
+
+fn route_of(bin: &Path, home: &Path) -> &'static str {
+    let root_owned = fs::symlink_metadata(bin).is_ok_and(|m| m.uid() == 0);
+    if bin.starts_with(home) && !root_owned { "user" } else { "system" }
 }
 
 // "2.1.288 (Claude Code)", "codex-cli 0.159.0", "0.86.1": the first word that starts with a digit
@@ -194,11 +197,11 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
         return Err(format!("unknown agent {agent}"));
     }
     let path = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()).unwrap_or_default();
-    let found = detect_in(agent, &path, home);
-    match found.route {
-        "system" => return Err(format!("{agent} is installed for everyone on this computer; it is updated with the system")),
-        "user" => return Err(format!("{agent} is already installed")),
-        _ => {}
+    // where it is, not its --version: the caller holds the accounts lock (accounts::install_op)
+    match find(agent, &path).map(|b| route_of(&b, home)) {
+        Some("system") => return Err(format!("{agent} is installed for everyone on this computer; it is updated with the system")),
+        Some(_) => return Err(format!("{agent} is already installed")),
+        None => {}
     }
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -439,6 +442,21 @@ mod tests {
         if let Some(p) = find("ls", "/usr/bin:/bin").filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.uid() == 0)) {
             assert_eq!(detect_in("ls", &p.parent().unwrap().to_string_lossy(), Path::new("/")).route, "system", "root-owned");
         }
+    }
+
+    // Installing an agent that is already there is refused at once: its --version, which can hang, is not run while
+    // the accounts lock is held.
+    #[test]
+    fn an_installed_agent_is_refused_without_its_version() {
+        let (_d, home, bin) = sandbox("installed");
+        let local = home.join(".local/bin");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("codex"), "#!/bin/sh\nsleep 3\n").unwrap();
+        fs::set_permissions(local.join("codex"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let env = env_for(&home, &bin, &[], "ok");
+        let t = Instant::now();
+        assert_eq!(begin("codex", false, &env, &home).err(), Some("codex is already installed".into()));
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
     }
 
     #[test]

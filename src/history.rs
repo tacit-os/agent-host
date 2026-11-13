@@ -7,7 +7,7 @@
 
 #[path = "sources.rs"]
 mod sources;
-pub use sources::{holder_outside, made_load, made_store, rename_offline, sweep_made, terminal_holder, tool_of, trash_session};
+pub use sources::{holder_outside, in_session_scope, made_load, made_store, rename_offline, sweep_made, terminal_holder, tool_of, trash_session};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -2603,12 +2603,10 @@ fn read_agents(path: &Path, live: &LiveTasks) -> Value {
         let record: Value = fs::read(dir.join("workflows").join(format!("{run_name}.json"))).ok()
             .and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         let script = record["script"].as_str().or(launched["script"].as_str()).unwrap_or("").to_string();
+        // a running inline script has no record yet: its meta's name, which the record will carry as workflowName
         let name = record["workflowName"].as_str().or(launched["name"].as_str()).map(str::to_string)
-            .or_else(|| after(&script, "name:").map(|t| {
-                let t = t.trim_start();
-                let q = t.chars().next().unwrap_or('\'');
-                t[q.len_utf8()..].split(q).next().unwrap_or("").to_string()
-            })).unwrap_or_else(|| run_name.clone());
+            .or_else(|| quoted_after(script.find("meta").map_or("", |i| &script[i..]), "name"))
+            .unwrap_or_else(|| run_name.clone());
         // its agents, as the journal tells them: started with a label and phase, then a result
         let mut members: Vec<Value> = Vec::new();
         let journal = run.join("journal.jsonl");
@@ -3401,6 +3399,32 @@ mod tests {
         assert_eq!((v["workflows"][0]["state"].clone(), v["workflows"][0]["agents"][0]["state"].clone()), (json!("stopped"), json!("stopped")));
         let v = agents_live(&main, &LiveTasks { running: HashSet::new(), alive: true });
         assert_eq!(v["agents"][0]["state"], json!("running"), "the host's process is alive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A running workflow launched with an inline script (no record yet, no saved name) is named by its meta's
+    // `name`, as its tool row reads it: not by a longer key that ends in name or a comment, and a script ending in
+    // `name:` is no panic.
+    #[test]
+    fn a_running_inline_workflow_is_named_by_its_meta() {
+        let dir = scratch("flowname");
+        let main = dir.join("flow-name-test.jsonl");
+        let runs = dir.join("flow-name-test/subagents/workflows");
+        let ts = "2026-11-13T00:00:00.000Z";
+        let mut lines = Vec::new();
+        for (call, run, script) in [("toolu_w1", "wf_1", "const meta = { filename: 'x.js', name: 'real' }\nphase('a')"),
+                                    ("toolu_w2", "wf_2", "// its name: below\nconst meta = { name: `second` }"),
+                                    ("toolu_w3", "wf_3", "phase('a') // name:")] {
+            fs::create_dir_all(runs.join(run)).unwrap();
+            lines.push(json!({"type": "assistant", "timestamp": ts, "message": {"content": [{"type": "tool_use", "id": call,
+                "name": "Workflow", "input": {"script": script}}]}}).to_string());
+            lines.push(json!({"type": "user", "timestamp": ts, "message": {"content": [{"type": "tool_result", "tool_use_id": call,
+                "content": format!("Workflow launched in the background.\nTask ID: t{run}\nTranscript dir: {}", runs.join(run).display())}]}}).to_string());
+        }
+        fs::write(&main, lines.join("\n") + "\n").unwrap();
+        let v = agents_live(&main, &LiveTasks::default());
+        let name = |run: &str| v["workflows"].as_array().unwrap().iter().find(|w| w["run"] == run).map_or(Value::Null, |w| w["name"].clone());
+        assert_eq!((name("wf_1"), name("wf_2"), name("wf_3")), (json!("real"), json!("second"), json!("wf_3")));
         let _ = fs::remove_dir_all(&dir);
     }
 }

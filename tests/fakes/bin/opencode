@@ -76,6 +76,8 @@ class H(BaseHTTPRequestHandler):
             time.sleep(60)
         if mode == "fail":
             return self.reply(400, {"data": {"message": "Token exchange failed: 400"}})
+        if pid == "anthropic" and b.get("code") == "refused#400":
+            return self.reply(400, {"name": "ProviderAuthOauthCallbackFailed", "data": {}})
         if pid == "anthropic" and b.get("code") != "good#code":
             return self.reply(200, False)
         time.sleep(0.2)

@@ -708,6 +708,7 @@ mod tests {
     // key's length, always 0, so the first reading stayed until the host restarted.
     #[test]
     fn an_opencode_sessions_new_turns_are_read() {
+        let _db = crate::tests::opencode_db_lock();
         let home = crate::tests::scratch_home();
         let db = home.join(".local/share/opencode/opencode.db");
         fs::create_dir_all(db.parent().unwrap()).unwrap();

@@ -31,9 +31,8 @@ fn gate_file() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-// `which`: --session-id <id> (new or resumed) or --fork <file>.
-fn command(s: &Session, which: [&str; 2]) -> Result<Command, String> {
-    let mut cmd = agent_command("pi", s.account.as_deref())?;
+// `which`: --session-id <id> (new or resumed) or --fork <file>. `cmd`: agent_command's for the session's account.
+fn command(s: &Session, mut cmd: Command, which: [&str; 2]) -> Result<Command, String> {
     cmd.args(["--mode", "rpc"]).args(which).arg("--no-extensions").arg("-e").arg(gate_file()?)
         .args(["--praxis-mode", s.mode_req.as_deref().unwrap_or("manual")]);
     if let Some(m) = &s.model_req {
@@ -50,9 +49,11 @@ fn command(s: &Session, which: [&str; 2]) -> Result<Command, String> {
 pub fn spawn(shared: &Shared, h: &mut Host, id: &str) -> Result<(), String> {
     h.next_gen += 1;
     let gen = h.next_gen;
+    let account = h.sessions.get(id).ok_or("no such session")?.account.clone();
+    let base = crate::session_command(h, "pi", account.as_deref())?.0;
     let s = h.sessions.get_mut(id).ok_or("no such session")?;
     s.gen = gen;
-    let mut cmd = command(s, ["--session-id", id])?;
+    let mut cmd = command(s, base, ["--session-id", id])?;
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("start pi: {e}"))?;
     let (stdout, stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -181,7 +182,7 @@ pub fn fork(shared: &Shared, path: &Path, cwd: &str, req: &Value, base: (Option<
         h.next_gen
     };
     s.gen = gen;
-    let mut cmd = command(&s, ["--fork", from.as_str()])?;
+    let mut cmd = command(&s, agent_command("pi", s.account.as_deref())?, ["--fork", from.as_str()])?;
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("start pi: {e}"))?;
     let (stdout, stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
