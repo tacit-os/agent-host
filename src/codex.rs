@@ -263,6 +263,8 @@ fn opened(shared: &Shared, srv: &Server, r: &Value, cwd: &str, req: &Value, base
     s.closing = None;
     s.model = r["model"].as_str().unwrap_or("").into();
     s.mode = s.mode_req.clone().unwrap_or_default();
+    // the level its turns are sent with (turn's effort), as a start or a pick since asked; none: the model's own
+    s.effort = s.effort_req.clone().unwrap_or_default();
     // the sandbox Codex runs the thread in, from its config: kept until a mode changes its kind
     s.native.insert("sandbox".into(), r["sandbox"].clone());
     s.last = Instant::now();
@@ -864,6 +866,30 @@ mod tests {
         assert_eq!(patch_of(&item), "*** Update File: /w/q.sql\n@@ -1,3 +1,3 @@\n--- TODO: remove\n select 1;\n+++ x\n-old\n+new\n");
         // a diff with no headers, as opencode's are cut
         assert_eq!(split_diff("@@ -1 +0,0 @@\n----\n").0, "---\n");
+    }
+
+    // A thread started with a level says so in its state, which Praxis reads after a reload, until another is chosen: the
+    // level went with each of its turns, but the state said "", and Praxis showed the model's default level instead.
+    #[test]
+    fn a_thread_started_with_a_level_reports_it() {
+        let (id, other) = ("019a0000-0000-7000-8000-00000000c004", "019a0000-0000-7000-8000-00000000c005");
+        let shared = host();
+        let (srv, _written) = fake_server("level-test");
+        let effort = |id: &str| shared.lock().unwrap().sessions[id].summary()["effort"].clone();
+        let reply = json!({"thread": {"id": id}, "model": "gpt-6-astra", "sandbox": {"type": "workspaceWrite"}});
+        opened(&shared, &srv, &reply, "/srv/w", &json!({"op": "start", "tool": "codex", "cwd": "/srv/w", "effort": "high"}), None).unwrap();
+        assert_eq!(effort(id), json!("high"), "as started");
+        // its server stopped, and a message resumed the thread: a send names no level
+        opened(&shared, &srv, &reply, "/srv/w", &json!({"op": "send", "id": id, "text": "go on"}), None).unwrap();
+        assert_eq!(effort(id), json!("high"), "after a resume");
+        {
+            let mut h = shared.lock().unwrap();
+            crate::handle(&shared, &mut h, 0, &json!({"op": "effort", "id": id, "effort": "low"}), None).unwrap();
+        }
+        assert_eq!(effort(id), json!("low"), "another level chosen");
+        // none chosen: none said, and Praxis shows the model's default
+        opened(&shared, &srv, &json!({"thread": {"id": other}, "model": "gpt-6-astra"}), "/srv/w", &json!({"op": "start"}), None).unwrap();
+        assert_eq!(effort(other), json!(""));
     }
 
     // Choosing the default model or level after another one sends the one a new thread gets: turn/start's model and
