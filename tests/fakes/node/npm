@@ -17,7 +17,16 @@ if [ "$1" = rm ]; then
 fi
 case "$FAKE_MODE" in
 hang) echo "npm http fetch GET 200"; exec sleep 30 ;;
-fail) echo "npm error code E404" >&2; echo "npm error 404 Not Found - GET https://registry.npmjs.org/$PKG" >&2; exit 1 ;;
+fail) # as npm 12.2 ends a 404: the cause second, where its log is last
+    echo "npm error code E404" >&2
+    echo "npm error 404 Not Found - GET https://registry.npmjs.org/$PKG" >&2
+    echo "npm error 404" >&2
+    echo "npm error 404  The requested resource '$PKG@*' could not be found or you do not have permission to access it." >&2
+    echo "npm error 404" >&2
+    echo "npm error 404 Note that you can also install from a" >&2
+    echo "npm error 404 tarball, folder, http url, or git url." >&2
+    echo "npm error A complete log of this run can be found in: $FAKE_OUT/npm-debug-0.log" >&2
+    exit 1 ;;
 esac
 mkdir -p "$P/bin"
 printf '#!/bin/sh\necho "%s 1.2.3"\n' "$B" > "$P/bin/$B"

@@ -20,13 +20,13 @@
 //! reports do not tell of.
 //! Owner, 2026-10-07: no model calls unless asked for.
 
-use crate::{catalog, history};
+use crate::{accounts, catalog, history, keys};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -101,17 +101,17 @@ fn sources(path: &Path, tool: &str, agents: &Value, working: bool) -> Vec<Source
     out
 }
 
-static TURNS: OnceLock<Mutex<HashMap<PathBuf, (u64, Vec<Value>)>>> = OnceLock::new();
+static TURNS: OnceLock<Mutex<HashMap<PathBuf, ((u64, u64), Vec<Value>)>>> = OnceLock::new();
 
 // A session's own turns as sources (its last 30 with words at the end): what was asked, the last
 // thing said, what its steps changed and the pictures they read. The newest turn counts as running
 // while the host's session is working (`working`); a transcript written a moment ago says nothing,
 // the turn that just ended wrote it.
 fn turns(path: &Path, tool: &str, working: bool) -> Vec<Source> {
-    let meta = fs::metadata(path).ok();
-    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    // kept until the transcript changes (an opencode session's key is no file: its length was always 0)
+    let mark = history::transcript_mark(path);
     let cache = TURNS.get_or_init(Default::default);
-    let cached = cache.lock().unwrap().get(path).filter(|(l, _)| *l == len).map(|(_, v)| v.clone());
+    let cached = cache.lock().unwrap().get(path).filter(|(m, _)| *m == mark).map(|(_, v)| v.clone());
     let list = cached.unwrap_or_else(|| {
         let (items, _) = history::transcript_from(path, tool, 0, true);
         let mut list: Vec<Value> = Vec::new();
@@ -142,7 +142,7 @@ fn turns(path: &Path, tool: &str, working: bool) -> Vec<Source> {
                 step += 1;
             }
         }
-        cache.lock().unwrap().insert(path.to_path_buf(), (len, list.clone()));
+        cache.lock().unwrap().insert(path.to_path_buf(), (mark, list.clone()));
         list
     });
     let n = list.len();
@@ -380,10 +380,20 @@ fn settle(q: &mut Queue, job: &Job, done: Result<(), String>) {
     }
 }
 
+// `claude` on the default Claude account, its key on fd 3 as a session gets it. Run on Personal, a person whose
+// default is an API-key account or one with a folder of its own got "Not logged in", or a reading billed to Personal.
+pub(crate) fn reader() -> Result<Command, String> {
+    let (mut cmd, key) = accounts::command_with("claude", accounts::default_account("claude").as_deref())?;
+    if let Some(k) = key {
+        keys::pass_fd3(&mut cmd, &k).map_err(|e| format!("pass the key: {e}"))?;
+    }
+    Ok(cmd)
+}
+
 // One `claude -p` call with a JSON schema: its structured output and what it cost.
 fn call(system: &str, schema: &str, prompt: &str) -> Result<(Value, f64), String> {
     let _ = fs::create_dir_all(dir());
-    let mut child = catalog::claude_command()
+    let mut child = reader()?
         .args(["-p", "--model", MODEL, "--output-format", "json", "--no-session-persistence",
                "--settings", r#"{"disableAllHooks":true}"#, "--tools", "", "--strict-mcp-config",
                "--system-prompt", system, "--json-schema", schema])
@@ -692,6 +702,34 @@ mod tests {
         assert_eq!((r["counts"]["running"].clone(), r["reports"].as_array().unwrap().len()), (json!(0), 1));
         assert_eq!(turns(&file, "claude", true)[0].state, "running");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // An opencode session (a key into opencode's database, not a file) shows its new turns: its cache was kept by the
+    // key's length, always 0, so the first reading stayed until the host restarted.
+    #[test]
+    fn an_opencode_sessions_new_turns_are_read() {
+        let home = crate::tests::scratch_home();
+        let db = home.join(".local/share/opencode/opencode.db");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let sql = |q: &str| assert!(std::process::Command::new("sqlite3").arg(&db).arg(q).status().unwrap().success(), "{q}");
+        sql("create table if not exists message (id text primary key, session_id text, time_created integer, data text); \
+             create table if not exists part (id text primary key, message_id text, session_id text, time_created integer, data text);");
+        let turn = |n: u64, asked: &str, said: &str| {
+            let (u, a) = (format!("msg_r{}", 2 * n), format!("msg_r{}", 2 * n + 1));
+            let t = 1_790_000_000_000 + n * 1000;
+            sql(&format!("insert into message values ('{u}', 'ses_results', {t}, '{{\"role\":\"user\"}}'); \
+                          insert into part values ('prt_{u}', '{u}', 'ses_results', {t}, '{{\"type\":\"text\",\"text\":\"{asked}\"}}'); \
+                          insert into message values ('{a}', 'ses_results', {}, '{{\"role\":\"assistant\",\"time\":{{\"completed\":{}}}}}'); \
+                          insert into part values ('prt_{a}', '{a}', 'ses_results', {}, '{{\"type\":\"text\",\"text\":\"{said}\"}}');", t + 1, t + 2, t + 1));
+        };
+        let key = PathBuf::from(format!("{}#ses_results", db.display()));
+        turn(1, "check the timer", "The timer is fine.");
+        assert_eq!(turns(&key, "opencode", false).len(), 1);
+        // a write in a later millisecond, as any later turn is
+        thread::sleep(Duration::from_millis(20));
+        turn(2, "and the clock?", "The clock is fine too.");
+        let now: Vec<String> = turns(&key, "opencode", false).into_iter().map(|s| s.report).collect();
+        assert_eq!(now, ["The timer is fine.", "The clock is fine too."]);
     }
 
     // A failed reading is shown to the session that asked for it, not to every session.

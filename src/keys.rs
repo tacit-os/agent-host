@@ -124,9 +124,15 @@ pub fn check(provider: &str, secret: &str) -> &'static str {
         cfg += &format!("header = \"{h}\"\n");
     }
     let code = run("curl", &["--config", "-"], Some(&cfg), Duration::from_secs(20)).map(|(_, o)| o.trim().to_string()).unwrap_or_default();
-    match code.as_str() {
+    verdict(provider, &code)
+}
+
+// The provider's HTTP status as what it says of the key. A 403 says the key is known but may not do this: a
+// restricted key without the models scope, a region or network the provider blocks, so it gives no verdict.
+fn verdict(provider: &str, code: &str) -> &'static str {
+    match code {
         c if c.starts_with('2') && c.len() == 3 => "ok",
-        "401" | "403" => "refused",
+        "401" => "refused",
         // Google answers a bad key with 400 API_KEY_INVALID
         "400" if provider == "google" => "refused",
         _ => "offline",
@@ -323,6 +329,17 @@ mod tests {
         let mut asked = 0;
         assert_eq!(keyring_by(|| { asked += 1; None }, none), "absent");
         assert_eq!(asked, 1, "a read that timed out is not asked again");
+    }
+
+    // A key the provider knows but does not let list its models (403) is not refused: it could not be saved, and a saved
+    // one blocked its accounts.
+    #[test]
+    fn only_a_bad_key_is_refused() {
+        for p in ["anthropic", "openai", "openrouter", "google"] {
+            assert_eq!((verdict(p, "200"), verdict(p, "401"), verdict(p, "403")), ("ok", "refused", "offline"), "{p}");
+            assert_eq!((verdict(p, "429"), verdict(p, "503"), verdict(p, "")), ("offline", "offline", "offline"), "{p}");
+        }
+        assert_eq!((verdict("google", "400"), verdict("openai", "400")), ("refused", "offline"));
     }
 
     #[test]

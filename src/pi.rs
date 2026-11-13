@@ -380,6 +380,11 @@ pub fn event(h: &mut Host, id: &str, gen: u64, v: Value) {
                 _ => {}
             }
         }
+        // pi tries a failed reply again itself (overloaded, a rate limit, a 5xx, a dropped connection) and settles
+        // only after: the error it retries did not end the turn, and a retry that fails again says so anew
+        "auto_retry_start" => {
+            s.native.remove("error");
+        }
         "agent_settled" => {
             if s.state == "idle" {
                 return;
@@ -402,5 +407,33 @@ pub fn event(h: &mut Host, id: &str, gen: u64, v: Value) {
     }
     for data in out {
         relay(h, id, gen, data, Some(v.clone()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A turn whose reply failed once and came on pi's own retry ends as a success with the reply, not as the error.
+    #[test]
+    fn a_reply_that_came_on_a_retry_is_not_a_failed_turn() {
+        let id = "5c0f1c2e-0000-4000-8000-00000000e001";
+        let mut h = Host::default();
+        let mut s = Session::new(id, "/", "pi");
+        s.state = "working";
+        h.sessions.insert(id.into(), s);
+        let said = |m: Value| json!({"type": "message_end", "message": m});
+        // as pi 0.86.1's agent-session.js sends them: the failed reply, the retry, the reply, then settled
+        for v in [said(json!({"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "529 overloaded_error: Overloaded"})),
+                  json!({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000, "errorMessage": "529 overloaded_error: Overloaded"}),
+                  said(json!({"role": "assistant", "content": [{"type": "text", "text": "Done: the tests pass."}], "stopReason": "stop"})),
+                  json!({"type": "auto_retry_end", "success": true, "attempt": 1}),
+                  json!({"type": "agent_settled"})] {
+            event(&mut h, id, 0, v);
+        }
+        let (_, line) = h.sessions[id].events.back().unwrap();
+        let r = &serde_json::from_str::<Value>(line).unwrap()["data"];
+        assert_eq!((r["type"].as_str(), r["is_error"].as_bool(), r["result"].as_str()), (Some("result"), Some(false), Some("Done: the tests pass.")), "{r}");
+        assert_eq!(r["subtype"], "success");
     }
 }

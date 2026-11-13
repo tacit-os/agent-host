@@ -20,7 +20,8 @@ use std::time::{Duration, SystemTime};
 use std::{env, fs, thread};
 
 /// The major version of the opencode `cmd` runs, from `--version` ("opencode v2.1.1", "1.18.31"), read once per
-/// binary and change; 1 when it does not say.
+/// binary and change; 1 when it does not say. A `--version` that failed, ran out of time or printed nothing (2 fetches
+/// its program on its first run) is asked again next time: kept, it held 2 to 1.x's CLI until the binary changed.
 pub fn major(cmd: &Command) -> u32 {
     let prog = cmd.get_program();
     let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v.map(|v| v.to_os_string())).or_else(|| env::var_os("PATH"));
@@ -42,7 +43,9 @@ pub fn major(cmd: &Command) -> u32 {
     if let Some(p) = path {
         c.env("PATH", p);
     }
-    let out = crate::signin::output(&mut c, Duration::from_secs(15)).map(|(_, o)| o).unwrap_or_default();
+    let Some((_, out)) = crate::signin::output(&mut c, Duration::from_secs(15)).ok().filter(|(st, o)| st.success() && !o.trim().is_empty()) else {
+        return 1;
+    };
     let v = parse_major(&out);
     seen.lock().unwrap().insert(bin, (stamp, v));
     v
@@ -271,6 +274,21 @@ mod tests {
         assert_eq!(parse_major("opencode v2.1.1\n"), 2);
         assert_eq!(parse_major("1.18.31"), 1);
         assert_eq!(parse_major(""), 1);
+    }
+
+    #[test]
+    fn a_version_that_failed_is_asked_again() {
+        let dir = env::temp_dir().join(format!("agent-host-oc-version-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("opencode");
+        // fails its first --version, as a first run fetching its program can
+        fs::write(&bin, "#!/bin/sh\nd=$(dirname \"$0\")\n[ -f \"$d/ran\" ] || { touch \"$d/ran\"; exit 1; }\necho 'opencode v2.1.1'\n").unwrap();
+        fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert_eq!(major(&Command::new(&bin)), 1);
+        assert_eq!(major(&Command::new(&bin)), 2, "the failed --version was kept as 1.x");
+        assert_eq!(major(&Command::new(&bin)), 2);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

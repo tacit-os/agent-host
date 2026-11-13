@@ -239,11 +239,6 @@ fn write_json(path: &Path, v: &Value) {
 
 // An agent (or curl) with the account's env: key and account variables removed, then ctx.home
 // as the agent's folder variable and ctx.env added.
-// `claude` as the catalog runs it, on the default account (results.rs)
-pub(crate) fn claude_command() -> Command {
-    command(&Ctx { agent: "claude".into(), account: String::new(), home: None, env: Vec::new(), cwd: None, anthropic_key: None }, "claude")
-}
-
 fn command(ctx: &Ctx, program: &str) -> Command {
     let mut cmd = Command::new(program);
     for (k, _) in env::vars_os() {

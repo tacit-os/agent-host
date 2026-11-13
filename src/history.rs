@@ -2057,6 +2057,15 @@ fn word(s: &str) -> String {
 pub(crate) fn mtime_ms(p: &Path) -> u64 {
     fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
 }
+
+/// What changes whenever a session's transcript does: its file's length, or for an opencode session (a key into
+/// opencode's database, no file of its own) the write times of the database and its log.
+pub(crate) fn transcript_mark(path: &Path) -> (u64, u64) {
+    if sources::is_opencode_key(path) {
+        return sources::opencode_mark();
+    }
+    (fs::metadata(path).map_or(0, |m| m.len()), 0)
+}
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }

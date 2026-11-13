@@ -313,6 +313,12 @@ pub fn command(agent: &str, account: Option<&str>) -> Result<Command, String> {
     command_with(agent, account).map(|c| c.0)
 }
 
+/// The account marked default for `agent`, as command_with takes it (None: Personal).
+pub fn default_account(agent: &str) -> Option<String> {
+    let id = default_of(&st().file, agent);
+    (id != personal_id(agent)).then_some(id)
+}
+
 // ── state ────────────────────────────────────────────────────────────────────────────────────
 
 fn folders_of(f: &Value, a: &Acct) -> Vec<String> {
@@ -656,7 +662,7 @@ fn note_key_check(f: &mut Value, id: &str, state: &str) {
 }
 
 /// The keys marked refused, as (id, provider): a mark from one check or one failed session, which a
-/// brief 403 or a mistaken failure leaves in place until someone checks by hand.
+/// brief 401 or a mistaken failure leaves in place until someone checks by hand.
 fn refused_keys(f: &Value) -> Vec<(String, String)> {
     f["keys"].as_array().into_iter().flatten().filter(|k| k["check"]["state"] == "refused")
         .filter_map(|k| Some((k["id"].as_str()?.to_string(), k["provider"].as_str()?.to_string()))).collect()
@@ -1631,6 +1637,28 @@ mod tests {
         let r = fill(&json!({"op": "start", "cwd": "/", "resume": "5b0f1c2e-0000-4000-8000-00000000a001", "account": "claude-work"}), "claude").unwrap();
         assert!(r["account"].is_null());
         assert!(fill(&json!({"op": "start", "cwd": "/", "account": "claude-work"}), "claude").is_err());
+    }
+
+    // Reports are read on the default Claude account, with its folder (and its key, on fd 3): Personal's sign-in, which
+    // an API-key account or one with a folder of its own does not use, answered "Not logged in".
+    #[test]
+    fn reports_are_read_on_the_default_account() {
+        crate::tests::scratch_home();
+        let dir = accounts_root().join("claude-reader");
+        fs::create_dir_all(&dir).unwrap();
+        {
+            let mut s = st();
+            let a = Acct { id: "claude-reader".into(), agent: "claude".into(), label: "Reader".into(), personal: false, home: Some(dir.clone()),
+                           use_: "plan".into(), key: None };
+            set_entry(&mut s.file, &a);
+            s.file["default"]["claude"] = json!("claude-reader");
+        }
+        let cmd = crate::results::reader();
+        // Personal is the default again for the other tests
+        st().file["default"].as_object_mut().map(|o| o.remove("claude"));
+        let cmd = cmd.unwrap();
+        let home = cmd.get_envs().find(|(k, _)| *k == "CLAUDE_CONFIG_DIR").and_then(|(_, v)| v.map(PathBuf::from));
+        assert_eq!(home, Some(dir), "reports are read on Personal");
     }
 
     #[test]

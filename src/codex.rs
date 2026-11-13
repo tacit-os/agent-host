@@ -8,9 +8,9 @@ use crate::{agent_command, ask, in_scope, own, path_list, relay, released, sent,
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, ChildStdout, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::{process, thread};
@@ -49,6 +49,11 @@ impl Server {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
         self.waiting.lock().unwrap().insert(n, tx);
+        // a server that has already exited answered its waiting calls before this one was added
+        if self.done.load(Ordering::Relaxed) {
+            self.waiting.lock().unwrap().remove(&n);
+            return Err("codex app-server has stopped".into());
+        }
         self.to()?.send(format!("{}\n", json!({"jsonrpc": "2.0", "id": n, "method": method, "params": params})))
             .map_err(|_| "codex app-server has stopped".to_string())?;
         let r = rx.recv_timeout(Duration::from_secs(90)).map_err(|_| format!("codex did not answer {method}"));
@@ -86,16 +91,23 @@ fn server(shared: &Shared, account: Option<&str>) -> Result<Arc<Server>, String>
     let mut cmd = agent_command("codex", account)?;
     // notify: no desktop notification per turn; the host reports turns itself
     cmd.args(["app-server", "-c", "notify=[]"]).current_dir(crate::home());
-    let mut cmd = in_scope(&cmd, &format!("agent-codex-{}-{gen}", process::id()));
+    let srv = launch(shared, &key, gen, in_scope(&cmd, &format!("agent-codex-{}-{gen}", process::id())))?;
+    all.insert(key, srv.clone());
+    Ok(srv)
+}
+
+// `cmd` started as the app-server of `key` and initialized; server() calls it with the servers lock held.
+fn launch(shared: &Shared, key: &str, gen: u64, mut cmd: Command) -> Result<Arc<Server>, String> {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("start codex: {e}"))?;
     let (stdout, stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let srv = Arc::new(Server { key: key.clone(), gen, tx: Mutex::new(Some(write_in(child.stdin.take().unwrap(), "codex-ap"))), waiting: Mutex::new(HashMap::new()),
+    let srv = Arc::new(Server { key: key.to_string(), gen, tx: Mutex::new(Some(write_in(child.stdin.take().unwrap(), "codex-ap"))), waiting: Mutex::new(HashMap::new()),
                                 next: AtomicU64::new(1), last: Mutex::new(Instant::now()), stderr: Mutex::new(VecDeque::new()),
                                 done: AtomicBool::new(false) });
     let (a, b) = (srv.clone(), srv.clone());
     let sh = shared.clone();
-    thread::spawn(move || read_server(sh, a, stdout, child));
+    let (said, heard) = channel::<()>();
+    thread::spawn(move || read_server(sh, a, stdout, child, heard));
     thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             let line = crate::keys::redact(&line).into_owned();
@@ -106,14 +118,22 @@ fn server(shared: &Shared, account: Option<&str>) -> Result<Arc<Server>, String>
                 e.pop_front();
             }
         }
+        drop(said); // all of it is in: read_server reports the exit with it
     });
-    srv.call("initialize", json!({"clientInfo": {"name": "agent-host", "version": env!("CARGO_PKG_VERSION")}}))?;
+    if let Err(e) = srv.call("initialize", json!({"clientInfo": {"name": "agent-host", "version": env!("CARGO_PKG_VERSION")}})) {
+        // a server that exits at start says why on stderr; one that hangs is let go of
+        srv.tx.lock().unwrap().take();
+        let said: Vec<String> = srv.stderr.lock().unwrap().iter().filter(|l| !l.trim().is_empty()).cloned().collect();
+        return Err(match said.len() {
+            0 => e,
+            n => format!("{e}. Codex says: {}", said[n.saturating_sub(5)..].join("\n")),
+        });
+    }
     srv.to()?.send(format!("{}\n", json!({"jsonrpc": "2.0", "method": "initialized"}))).map_err(|e| e.to_string())?;
-    all.insert(key, srv.clone());
     Ok(srv)
 }
 
-fn read_server(shared: Shared, srv: Arc<Server>, out: ChildStdout, mut child: Child) {
+fn read_server(shared: Shared, srv: Arc<Server>, out: ChildStdout, mut child: Child, stderr_end: Receiver<()>) {
     for line in BufReader::new(out).lines() {
         let Ok(line) = line else { break };
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
@@ -131,15 +151,17 @@ fn read_server(shared: Shared, srv: Arc<Server>, out: ChildStdout, mut child: Ch
         }
     }
     let code = child.wait().ok().and_then(|s| s.code());
+    let _ = stderr_end.recv_timeout(Duration::from_secs(1));
     srv.done.store(true, Ordering::Relaxed);
+    // answered before the servers lock is taken: server() holds it while it waits for initialize
+    for (_, tx) in srv.waiting.lock().unwrap().drain() {
+        let _ = tx.send(Err("codex app-server has stopped".into()));
+    }
     {
         let mut all = servers().lock().unwrap();
         if all.get(&srv.key).is_some_and(|s| Arc::ptr_eq(s, &srv)) {
             all.remove(&srv.key);
         }
-    }
-    for (_, tx) in srv.waiting.lock().unwrap().drain() {
-        let _ = tx.send(Err("codex app-server has stopped".into()));
     }
     // the threads still open on it end with it
     let stderr: Vec<String> = srv.stderr.lock().unwrap().iter().cloned().collect();
@@ -150,8 +172,8 @@ fn read_server(shared: Shared, srv: Arc<Server>, out: ChildStdout, mut child: Ch
     }
 }
 
-// A thread's mode as Codex's approval policy, sandbox and reviewer. `turn`: in turn/start's shape
-// (sandboxPolicy) rather than thread/start's (sandbox).
+// A thread's mode as Codex's approval policy, sandbox and reviewer. `turn`: in turn/start's shape,
+// without the sandbox: turn() sends one only when the mode changes its kind (sandbox_change).
 fn policy(mode: Option<&str>, turn: bool) -> Value {
     let (approval, sandbox, reviewer) = match mode {
         Some("manual" | "default") => ("untrusted", "workspace-write", "user"),
@@ -161,13 +183,43 @@ fn policy(mode: Option<&str>, turn: bool) -> Value {
         _ => return json!({}),
     };
     let mut p = json!({"approvalPolicy": approval});
-    if turn {
-        p["sandboxPolicy"] = json!({"type": if sandbox == "read-only" { "readOnly" } else { "workspaceWrite" }});
-    } else {
+    if !turn {
         p["sandbox"] = json!(sandbox);
     }
     // set every time: the user's own config may name another reviewer
     p["approvalsReviewer"] = json!(reviewer);
+    p
+}
+
+// The kind of sandbox a turn of the thread must change to for its mode, as turn/start names it; None
+// when it runs in that kind already. A turn's sandboxPolicy replaces the whole of the thread's, which
+// Codex built from the person's [sandbox_workspace_write] (network access, extra writable folders),
+// so one sent on every turn turned those off from the first turn on.
+fn sandbox_change(s: &Session) -> Option<&'static str> {
+    let kind = match policy(s.mode_req.as_deref(), false)["sandbox"].as_str()? {
+        "read-only" => "readOnly",
+        _ => "workspaceWrite",
+    };
+    (s.native.get("sandbox").and_then(|p| p["type"].as_str()) != Some(kind)).then_some(kind)
+}
+
+// A sandbox of `kind` as Codex builds one from the person's config for `cwd`.
+fn sandbox_policy(srv: &Server, kind: &str, cwd: &str) -> Value {
+    let mut p = json!({"type": kind});
+    if kind == "workspaceWrite" {
+        match srv.call("config/read", json!({"cwd": cwd})) {
+            Ok(r) => {
+                let w = &r["config"]["sandbox_workspace_write"];
+                for (from, to) in [("network_access", "networkAccess"), ("writable_roots", "writableRoots"),
+                                   ("exclude_slash_tmp", "excludeSlashTmp"), ("exclude_tmpdir_env_var", "excludeTmpdirEnvVar")] {
+                    if !w[from].is_null() {
+                        p[to] = w[from].clone();
+                    }
+                }
+            }
+            Err(e) => eprintln!("[codex] config/read: {e}"),
+        }
+    }
     p
 }
 
@@ -194,6 +246,8 @@ fn opened(shared: &Shared, srv: &Server, r: &Value, cwd: &str, req: &Value, base
     s.closing = None;
     s.model = r["model"].as_str().unwrap_or("").into();
     s.mode = s.mode_req.clone().unwrap_or_default();
+    // the sandbox Codex runs the thread in, from its config: kept until a mode changes its kind
+    s.native.insert("sandbox".into(), r["sandbox"].clone());
     s.last = Instant::now();
     h.announce(&id);
     Ok(id)
@@ -243,9 +297,9 @@ pub fn start(shared: &Shared, req: &Value) -> Result<Value, String> {
             (id, srv)
         }
     };
-    skills(srv, shared.lock().unwrap().sessions.get(&id).and_then(|s| s.account.clone()), cwd);
+    skills(srv.clone(), shared.lock().unwrap().sessions.get(&id).and_then(|s| s.account.clone()), cwd);
     if let Some(t) = req["text"].as_str() {
-        turn(shared, &id, t, &path_list(req, "images"), &path_list(req, "files"))?;
+        turn(shared, &srv, &id, t, &path_list(req, "images"), &path_list(req, "files"))?;
     }
     Ok(json!({"ev": "started", "id": id, "tool": "codex"}))
 }
@@ -254,20 +308,23 @@ pub fn send(shared: &Shared, req: &Value) -> Result<Value, String> {
     let id = req["id"].as_str().ok_or("send needs an id")?;
     let text = req["text"].as_str().ok_or("send needs text")?;
     let cwd = shared.lock().unwrap().sessions.get(id).map(|s| s.cwd.clone()).ok_or(format!("no such session: {id}"))?;
-    load(shared, id, &cwd, req)?;
-    turn(shared, id, text, &path_list(req, "images"), &path_list(req, "files"))?;
+    let srv = load(shared, id, &cwd, req)?;
+    turn(shared, &srv, id, text, &path_list(req, "images"), &path_list(req, "files"))?;
     Ok(json!({"ev": "ok"}))
 }
 
-// A message as a new turn, or into the running one (turn/steer). Files are named in the text, as
-// @-mentions (Codex's mention input is for apps and plugins); images go as localImage.
-fn turn(shared: &Shared, id: &str, text: &str, images: &[String], files: &[String]) -> Result<(), String> {
+// A message as a new turn, or into the running one (turn/steer), on the server the caller loaded the
+// thread on: looked up here, the servers lock was waited for with the host locked, behind a start.
+// Files are named in the text, as @-mentions (Codex's mention input is for apps and plugins); images
+// go as localImage.
+fn turn(shared: &Shared, srv: &Server, id: &str, text: &str, images: &[String], files: &[String]) -> Result<(), String> {
     let mut input = vec![json!({"type": "text", "text": crate::with_mentions(text, files)})];
     input.extend(images.iter().map(|p| json!({"type": "localImage", "path": p})));
-    let (srv, running, params) = {
+    let (running, mut params, change, cwd) = {
         let mut h = shared.lock().unwrap();
         let s = h.sessions.get(id).ok_or("no such session")?;
         let running = s.turn.clone();
+        let (change, cwd) = (sandbox_change(s), s.cwd.clone());
         let mut p = with(json!({"threadId": id, "input": input}), policy(s.mode_req.as_deref(), true));
         if let Some(m) = &s.model_req {
             p["model"] = json!(m);
@@ -275,14 +332,18 @@ fn turn(shared: &Shared, id: &str, text: &str, images: &[String], files: &[Strin
         if let Some(e) = &s.effort_req {
             p["effort"] = json!(e);
         }
-        let key = s.account.clone().unwrap_or_default();
         // marked working before the turn starts: a turn that ends at once must find it so
         sent(&mut h, id, text);
         h.announce(id);
-        (servers().lock().unwrap().get(&key).cloned(), running, p)
+        (running, p, change, cwd)
     };
-    let srv = srv.ok_or("codex app-server has stopped")?;
+    let mut sandbox = None;
     let r = if running.is_empty() {
+        if let Some(kind) = change {
+            let p = sandbox_policy(srv, kind, &cwd);
+            params["sandboxPolicy"] = p.clone();
+            sandbox = Some(p);
+        }
         srv.call("turn/start", params)
     } else {
         srv.call("turn/steer", json!({"threadId": id, "expectedTurnId": running, "input": params["input"]}))
@@ -295,6 +356,9 @@ fn turn(shared: &Shared, id: &str, text: &str, images: &[String], files: &[Strin
                 if s.turn_at != 0 && s.turn.is_empty() {
                     s.turn = t.to_string();
                 }
+            }
+            if let (Some(s), Some(p)) = (h.sessions.get_mut(id), sandbox) {
+                s.native.insert("sandbox".into(), p);
             }
             Ok(())
         }
@@ -613,5 +677,134 @@ fn server_request(h: &mut Host, srv: &Server, v: Value) {
         None => {
             let _ = srv.to().map(|to| to.send(format!("{}\n", json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32601, "message": "not handled by agent-host"}}))));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Host;
+
+    fn host() -> Shared {
+        Arc::new(Mutex::new(Host::default()))
+    }
+
+    // A server as server() makes one, whose writes go to the returned receiver.
+    fn fake_server(key: &str) -> (Arc<Server>, std::sync::mpsc::Receiver<String>) {
+        let (to, written) = channel();
+        let srv = Server { key: key.into(), gen: GEN.fetch_add(1, Ordering::Relaxed), tx: Mutex::new(Some(to)), waiting: Mutex::new(HashMap::new()),
+                           next: AtomicU64::new(1), last: Mutex::new(Instant::now()), stderr: Mutex::new(VecDeque::new()), done: AtomicBool::new(false) };
+        (Arc::new(srv), written)
+    }
+
+    // An app-server that exits at start (a -c value it cannot read, a crash, a codex systemd-run cannot find) fails
+    // its start at once and says why, although server() holds the servers lock throughout: the exit's reader took
+    // that lock before answering the waiting initialize, so the start waited 90 s and said only that it got no answer.
+    #[test]
+    fn a_server_that_exits_at_start_fails_at_once_with_why() {
+        let shared = host();
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let _all = servers().lock().unwrap();
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo 'Error: invalid type: string \"[\", expected a sequence' >&2; echo 'in `notify`' >&2; exit 1"]);
+            let _ = tx.send(launch(&shared, "exits-at-start", GEN.fetch_add(1, Ordering::Relaxed), cmd).map(|_| ()));
+        });
+        let r = rx.recv_timeout(Duration::from_secs(20)).expect("the start still waits for an answer after its server exited");
+        let e = r.unwrap_err();
+        assert!(e.starts_with("codex app-server has stopped") && e.ends_with("expected a sequence\nin `notify`"), "{e}");
+    }
+
+    // A message to a running thread never waits on the servers lock with the host locked: a Codex start holds that
+    // lock for up to 95 s (a closing server, then initialize), and the turn that waited for it under the host lock
+    // stalled every session's reader and every client of the host with it.
+    #[test]
+    fn a_turn_does_not_wait_on_a_start_with_the_host_locked() {
+        let id = "019a0000-0000-7000-8000-00000000c001";
+        let shared = host();
+        let (srv, written) = fake_server("");
+        {
+            let mut h = shared.lock().unwrap();
+            let mut s = Session::new(id, "/", "codex");
+            (s.gen, s.to_child) = (srv.gen, srv.to().ok());
+            h.sessions.insert(id.into(), s);
+        }
+        // Codex answers turn/start
+        let codex = srv.clone();
+        thread::spawn(move || {
+            for l in written {
+                let v: Value = serde_json::from_str(&l).unwrap();
+                if let Some(tx) = v["id"].as_u64().and_then(|n| codex.waiting.lock().unwrap().remove(&n)) {
+                    let _ = tx.send(Ok(json!({"turn": {"id": "turn-1"}})));
+                }
+            }
+        });
+        // a start under way for another account
+        let (held, holding) = channel();
+        let (end, ended) = channel::<()>();
+        thread::spawn(move || {
+            let _all = servers().lock().unwrap();
+            let _ = held.send(());
+            let _ = ended.recv_timeout(Duration::from_secs(30));
+        });
+        holding.recv().unwrap();
+        let (sh, s2, (tx, rx)) = (shared.clone(), srv.clone(), channel());
+        thread::spawn(move || {
+            let _ = tx.send(turn(&sh, &s2, id, "and then?", &[], &[]));
+        });
+        let r = rx.recv_timeout(Duration::from_secs(10)).expect("the turn waited on the servers lock with the host locked");
+        let _ = end.send(());
+        assert_eq!(r, Ok(()));
+        assert_eq!(shared.lock().unwrap().sessions[id].turn, "turn-1");
+    }
+
+    // A turn keeps the sandbox Codex built for the thread from the person's config (network access, extra writable
+    // folders): every turn/start sent a bare {"type": "workspaceWrite"}, which replaces it for that turn and the
+    // next. A mode that changes the sandbox's kind still changes it, a workspace-write one filled from the config.
+    #[test]
+    fn a_turn_keeps_the_sandbox_codex_made_from_the_config() {
+        let id = "019a0000-0000-7000-8000-00000000c002";
+        let shared = host();
+        let (srv, written) = fake_server("sandbox-test");
+        let configured = json!({"type": "workspaceWrite", "networkAccess": true, "writableRoots": ["/srv/extra"],
+                                "excludeSlashTmp": false, "excludeTmpdirEnvVar": false});
+        // Codex answers config/read with the person's [sandbox_workspace_write] and notes every turn/start
+        let (codex, (starts, started)) = (srv.clone(), channel());
+        thread::spawn(move || {
+            for l in written {
+                let v: Value = serde_json::from_str(&l).unwrap();
+                let answer = match v["method"].as_str().unwrap_or("") {
+                    "config/read" => json!({"config": {"sandbox_workspace_write": {"network_access": true, "writable_roots": ["/srv/extra"],
+                                                                                   "exclude_slash_tmp": false, "exclude_tmpdir_env_var": false}}}),
+                    "turn/start" => {
+                        let _ = starts.send(v["params"].clone());
+                        json!({"turn": {"id": "turn-1"}})
+                    }
+                    _ => json!({}),
+                };
+                if let Some(tx) = v["id"].as_u64().and_then(|n| codex.waiting.lock().unwrap().remove(&n)) {
+                    let _ = tx.send(Ok(answer));
+                }
+            }
+        });
+        let reply = json!({"thread": {"id": id}, "model": "gpt-5", "sandbox": configured});
+        opened(&shared, &srv, &reply, "/srv/w", &json!({"mode": "acceptEdits"}), None).unwrap();
+        let send = |mode: &str| {
+            {
+                let mut h = shared.lock().unwrap();
+                let s = h.sessions.get_mut(id).unwrap();
+                s.mode_req = Some(mode.into());
+                s.turn.clear(); // the last turn has ended
+            }
+            turn(&shared, &srv, id, "go on", &[], &[]).unwrap();
+            started.recv_timeout(Duration::from_secs(5)).unwrap()
+        };
+        let p = send("acceptEdits");
+        assert_eq!(p["approvalPolicy"], "on-request");
+        assert!(p.get("sandboxPolicy").is_none(), "a turn replaced the thread's sandbox: {p}");
+        assert_eq!(send("plan")["sandboxPolicy"], json!({"type": "readOnly"}));
+        assert!(send("plan").get("sandboxPolicy").is_none());
+        assert_eq!(send("acceptEdits")["sandboxPolicy"], configured, "back to edits without the config's network and folders");
+        assert!(send("auto").get("sandboxPolicy").is_none(), "auto runs in the same kind");
     }
 }

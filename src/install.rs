@@ -253,7 +253,16 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
     Ok(Install { run })
 }
 
-// Runs one step to its end, its output a line at a time. Err: it failed, with its last line.
+// npm's first line of why a run failed. It prints the error's code, syscall, errno and path first, and ends
+// every failed run with where its log is, so its last line never says why (npm 12.2).
+fn npm_cause(l: &str) -> bool {
+    let Some(said) = l.strip_prefix("npm error ").or(l.strip_prefix("npm ERR! ")) else { return false };
+    let field = said.split_whitespace().next().unwrap_or("");
+    !["code", "syscall", "errno", "path"].contains(&field) && !said.starts_with("A complete log of this run")
+}
+
+// Runs one step to its end, its output a line at a time. Err: it failed, with npm's line of why, or its
+// last line.
 fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result<(), String> {
     let mut cmd = command("", None, env, &argv[0]);
     cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -269,17 +278,23 @@ fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result
         st.proc = Some(proc.clone());
         (proc, out, err)
     };
-    let last = Arc::new(Mutex::new(String::new()));
-    let feed = |r: Arc<Run>, last: Arc<Mutex<String>>| move |l: String| {
+    let (last, cause) = (Arc::new(Mutex::new(String::new())), Arc::new(Mutex::new(String::new())));
+    let feed = |r: Arc<Run>, last: Arc<Mutex<String>>, cause: Arc<Mutex<String>>| move |l: String| {
         // progress redrawn with \r: the last part is what shows
         let l = plain(l.rsplit('\r').next().unwrap_or("")).trim().to_string();
         if !l.is_empty() {
+            if npm_cause(&l) {
+                let mut c = cause.lock().unwrap();
+                if c.is_empty() {
+                    *c = l.clone();
+                }
+            }
             *last.lock().unwrap() = l.clone();
             r.step(InstallStep::Running { line: l });
         }
     };
-    let orx = read_lines(out, feed(run.clone(), last.clone()));
-    let erx = read_lines(err, feed(run.clone(), last.clone()));
+    let orx = read_lines(out, feed(run.clone(), last.clone(), cause.clone()));
+    let erx = read_lines(err, feed(run.clone(), last.clone(), cause.clone()));
     let st = proc.wait();
     drained(&orx);
     drained(&erx);
@@ -301,8 +316,8 @@ fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result
         None => Ok(()),
         Some(s) if s.success() => Ok(()),
         Some(s) => {
-            let last = last.lock().unwrap().clone();
-            Err(if last.is_empty() { format!("{} exited with {s}", argv[0]) } else { last })
+            let (last, cause) = (last.lock().unwrap().clone(), cause.lock().unwrap().clone());
+            Err(if !cause.is_empty() { cause } else if last.is_empty() { format!("{} exited with {s}", argv[0]) } else { last })
         }
     }
 }
@@ -428,6 +443,18 @@ mod tests {
         let (_i, rx) = begin("opencode", false, &env_for(&home, &bin, &["node"], "fail"), &home).unwrap();
         assert_eq!(rest(&rx).last(), Some(&InstallStep::Failed("npm error 404 Not Found - GET https://registry.npmjs.org/@opencode/cli".into())));
         assert!(begin("gemini", false, &env, &home).is_err());
+    }
+
+    // npm 12.2's lines for a registry it could not reach (127.0.0.1:9, run here): the cause, not the log's place
+    #[test]
+    fn npm_says_why() {
+        let said = ["npm error code ECONNREFUSED", "npm error syscall connect", "npm error errno ECONNREFUSED",
+                    "npm error FetchError: request to http://127.0.0.1:9/@openai%2fcodex failed, reason: connect ECONNREFUSED 127.0.0.1:9",
+                    "npm error     at ClientRequest.<anonymous> (/usr/lib/node_modules/npm/node_modules/minipass-fetch/lib/index.js:130:14)",
+                    "npm error A complete log of this run can be found in: /tmp/npm/_logs/2026-11-12T23_34_47_382Z-debug-0.log"];
+        assert_eq!(said.iter().find(|l| npm_cause(l)), Some(&said[3]));
+        assert!(!npm_cause("added 1 package in 1s") && !npm_cause("npm error path /usr/lib/node_modules/@openai"));
+        assert!(npm_cause("npm ERR! 404 Not Found - GET https://registry.npmjs.org/x"), "older npm");
     }
 
     #[test]
