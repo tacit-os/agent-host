@@ -1846,6 +1846,20 @@ mod tests {
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    // The host's own drop-in caps its swap as in_scope caps a session's: MemoryMax counts memory only, so with no
+    // MemorySwapMax a host past MemoryHigh went on into swap without a bound.
+    #[test]
+    fn the_host_caps_its_swap_as_its_sessions_do() {
+        let conf = include_str!("../contrib/systemd/agent-host.service.d/90-memory.conf");
+        let set = |key: &str| conf.lines().find_map(|l| l.trim().strip_prefix(&format!("{key}=")).map(str::to_string));
+        let scope = in_scope(&Command::new("true"), "agent-test");
+        let args: Vec<String> = scope.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let session = args.iter().find_map(|a| a.strip_prefix("MemorySwapMax=")).map(str::to_string);
+        assert!(session.is_some(), "sessions run with no swap cap: {args:?}");
+        assert!(set("MemoryMax").is_some(), "the host's drop-in has no MemoryMax");
+        assert_eq!(set("MemorySwapMax"), session, "the host's swap is not capped as its sessions' is");
+    }
+
     #[test]
     fn a_start_that_cannot_spawn_leaves_no_session() {
         let home = scratch_home();
