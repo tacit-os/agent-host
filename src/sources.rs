@@ -741,10 +741,16 @@ fn runs_under(pid: u32, ancestor: u32) -> bool {
     false
 }
 
+// Where Claude Code processes keep those records: Personal's ~/.claude/sessions, and the sessions folder in each added
+// account's CLAUDE_CONFIG_DIR, which is not linked to Personal's.
+pub(super) fn record_dirs() -> Vec<PathBuf> {
+    std::iter::once(home().join(".claude")).chain(crate::accounts::claude_homes()).map(|d| d.join("sessions")).collect()
+}
+
 // terminal_holder, not counting the process `own` (0: none) and what runs beneath it: the host's own
 // process for the session has a record too, and it is not a terminal.
 pub fn holder_outside(id: &str, own: u32) -> Option<u32> {
-    for f in list_dir(&home().join(".claude/sessions")) {
+    for f in record_dirs().iter().flat_map(|d| list_dir(d)) {
         if f.extension().map_or(true, |e| e != "json") {
             continue;
         }

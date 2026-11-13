@@ -321,6 +321,13 @@ pub fn command(agent: &str, account: Option<&str>) -> Result<Command, String> {
     command_with(agent, account).map(|c| c.0)
 }
 
+/// The folders of the added Claude Code accounts (their CLAUDE_CONFIG_DIR). None before start has read the accounts
+/// (start reads them before any session or client), so a test of other parts never reads them from its HOME.
+pub fn claude_homes() -> Vec<PathBuf> {
+    let Some(s) = STATE.get() else { return Vec::new() };
+    all(&s.lock().unwrap().file).into_iter().filter(|a| a.agent == "claude").filter_map(|a| a.home).collect()
+}
+
 /// The account marked default for `agent`, as command_with takes it (None: Personal).
 pub fn default_account(agent: &str) -> Option<String> {
     let id = default_of(&st().file, agent);
@@ -1602,6 +1609,40 @@ mod tests {
             {"id": "k4", "provider": "openrouter"}]});
         assert_eq!(refused_keys(&f), vec![("k1".to_string(), "openai".to_string())]);
         assert!(refused_keys(&json!({})).is_empty());
+    }
+
+    // An added account's Claude Code keeps its session records in the account's folder (CLAUDE_CONFIG_DIR/sessions, not
+    // linked to Personal's): one of its processes that has the session open (a turn the previous host's process is
+    // finishing, a terminal) holds it as one of Personal's does, so a start is refused and a delete says why.
+    #[test]
+    fn a_session_an_accounts_process_has_open_is_held() {
+        let home = crate::tests::scratch_home();
+        let dir = accounts_root().join("claude-second");
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        {
+            let a = Acct { id: "claude-second".into(), agent: "claude".into(), label: "Second".into(), personal: false, home: Some(dir.clone()),
+                           use_: "plan".into(), key: None };
+            set_entry(&mut st().file, &a);
+        }
+        let id = "4a0f1c2e-0000-4000-8000-00000000d007";
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = other.id();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let since = stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19).unwrap().to_string();
+        fs::write(dir.join(format!("sessions/{pid}.json")), json!({"sessionId": id, "pid": pid, "procStart": since}).to_string()).unwrap();
+        let held = crate::history::holder_outside(id, 0);
+        let shared: crate::Shared = std::sync::Arc::new(Mutex::new(crate::Host::default()));
+        // a missing account, so that a start the record does not stop fails there and runs no Claude Code
+        let req = json!({"op": "start", "cwd": home.to_str().unwrap(), "resume": id, "account": "claude-none"});
+        let started = crate::start(&shared, &mut shared.lock().unwrap(), &req, "claude").err();
+        let past: crate::Past = std::sync::Arc::new(Mutex::new(crate::History::default()));
+        let deleted = crate::delete(&shared, &past, &json!({"op": "delete", "id": id})).err();
+        let _ = other.kill();
+        let _ = other.wait();
+        st().file["accounts"].as_array_mut().unwrap().retain(|e| e["id"] != "claude-second");
+        assert_eq!(held, Some(pid), "the account's process is not seen");
+        assert_eq!(started, Some(format!("Another Claude Code process (pid {pid}) has this session open. Send again once it has closed.")));
+        assert_eq!(deleted.as_deref(), Some("Open in a terminal"));
     }
 
     // an added Claude key account named `id`, with a folder holding a file

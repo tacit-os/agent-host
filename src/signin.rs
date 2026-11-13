@@ -67,7 +67,7 @@ pub struct LoginSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    Waiting { url: String, opened: bool },  // opened: the CLI or the host opened the browser
+    Waiting { url: String, opened: bool, code_url: String },  // opened: the CLI or the host opened the browser; code_url: the page that shows a code, when url does not ("" none)
     Code { url: String, message: Option<String> },  // url: the page that shows the code ("" none); message: the last one was refused
     Device { url: String, user_code: String },
     Busy { holder: String },                // holder: the agent signing in or holding 1455; "" another program
@@ -80,7 +80,13 @@ impl Step {
     /// The `signin` push's fields (plan §3.2), without account and provider.
     pub fn to_json(&self) -> Value {
         match self {
-            Step::Waiting { url, opened } => json!({"step": "waiting", "url": url, "opened": opened}),
+            Step::Waiting { url, opened, code_url } => {
+                let mut v = json!({"step": "waiting", "url": url, "opened": opened});
+                if !code_url.is_empty() {
+                    v["codeUrl"] = json!(code_url);
+                }
+                v
+            }
             Step::Code { url, message } => {
                 let mut v = json!({"step": "code"});
                 if !url.is_empty() {
@@ -247,8 +253,8 @@ impl Run {
     fn step(&self, s: Step) {
         let ended = self.ended.lock().unwrap();
         if !*ended {
-            if let Step::Waiting { url, .. } = &s {
-                *self.url.lock().unwrap() = url.clone();
+            if let Step::Waiting { url, code_url, .. } = &s {
+                *self.url.lock().unwrap() = if code_url.is_empty() { url.clone() } else { code_url.clone() };
             }
             if let Some(tx) = &*self.tx.lock().unwrap() {
                 let _ = tx.send(s);
@@ -615,10 +621,9 @@ fn claude_login(run: &Arc<Run>, spec: &LoginSpec, share: &Path) -> Result<(), St
                     url_next = false;
                     let url = browser_url(&capture_read).unwrap_or_else(|| manual.clone());
                     let opened = open(&spec_open, &url);
-                    r.step(Step::Waiting { url, opened });
                     // the automatic address is opened, but its page goes back to the CLI's localhost listener and
-                    // shows no code: a code to paste comes from the printed page, which Code steps point at
-                    *r.url.lock().unwrap() = manual;
+                    // shows no code: a code to paste comes from the printed page, which the step and Code steps point at
+                    r.step(Step::Waiting { url, opened, code_url: manual });
                 }
                 None => url_next = !url_next,
             }
@@ -803,7 +808,7 @@ fn codex_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
             } else {
                 let url = s["authUrl"].as_str().ok_or("codex sent no sign-in address")?;
                 let opened = open(&spec, url);
-                r.step(Step::Waiting { url: url.into(), opened });
+                r.step(Step::Waiting { url: url.into(), opened, code_url: String::new() });
             }
             let notes = srv.notes.lock().unwrap();
             let done = loop {
@@ -884,7 +889,7 @@ fn pi_login(run: &Arc<Run>, spec: &LoginSpec, share: &Path) -> Result<(), String
             Some("auth_url") => {
                 if let Some(url) = v["url"].as_str() {
                     let opened = open(&spec2, url);
-                    r.step(Step::Waiting { url: url.into(), opened });
+                    r.step(Step::Waiting { url: url.into(), opened, code_url: String::new() });
                 }
             }
             Some("device_code") => {
@@ -1072,7 +1077,7 @@ fn opencode_login(run: &Arc<Run>, spec: &LoginSpec) -> Result<(), String> {
                 Some(code) if !by_code => r.step(Step::Device { url, user_code: code }),
                 _ => {
                     let opened = !url.is_empty() && open(&spec, &url);
-                    r.step(Step::Waiting { url, opened });
+                    r.step(Step::Waiting { url, opened, code_url: String::new() });
                 }
             }
             if !by_code {
@@ -1150,7 +1155,7 @@ fn opencode2_login(r: &Arc<Run>, spec: &LoginSpec, port: u16, auth: &str, provid
             Some(code) if !by_code => r.step(Step::Device { url, user_code: code }),
             _ => {
                 let opened = !url.is_empty() && open(spec, &url);
-                r.step(Step::Waiting { url, opened });
+                r.step(Step::Waiting { url, opened, code_url: String::new() });
             }
         }
         Ok((attempt, by_code))
@@ -1527,7 +1532,9 @@ mod tests {
 
     #[test]
     fn steps_as_json() {
-        assert_eq!(Step::Waiting { url: "u".into(), opened: true }.to_json(), json!({"step": "waiting", "url": "u", "opened": true}));
+        assert_eq!(Step::Waiting { url: "u".into(), opened: true, code_url: String::new() }.to_json(), json!({"step": "waiting", "url": "u", "opened": true}));
+        assert_eq!(Step::Waiting { url: "u".into(), opened: true, code_url: "c".into() }.to_json(),
+                   json!({"step": "waiting", "url": "u", "opened": true, "codeUrl": "c"}));
         assert_eq!(Step::Code { url: String::new(), message: None }.to_json(), json!({"step": "code"}));
         assert_eq!(Step::Code { url: "u".into(), message: Some("m".into()) }.to_json(), json!({"step": "code", "url": "u", "message": "m"}));
         assert_eq!(Step::Device { url: "u".into(), user_code: "C".into() }.to_json(), json!({"step": "device", "url": "u", "userCode": "C"}));
@@ -1558,7 +1565,7 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "ok"), &out);
         assert!(login.pid().is_some());
-        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true }, done(Some("someone@example.com"), Some("max"))],
+        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true, code_url: CLAUDE_URL.into() }, done(Some("someone@example.com"), Some("max"))],
                    "the standing paste prompt is no step");
         assert_eq!(fs::read_to_string(out.join("claude.args")).unwrap(), "auth\nlogin\n--claudeai\n");
         assert!(fs::read_to_string(out.join("claude.env")).unwrap().lines().any(|l| l == "CLAUDE_CONFIG_DIR"));
@@ -1573,7 +1580,7 @@ mod tests {
         let _s = serial();
         let out = scratch("claude-manual");
         let (login, rx) = begin(spec("claude", "browser", None, None, &out, "nobrowser"), &out);
-        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_URL.into(), opened: true }, done(Some("someone@example.com"), Some("max"))]);
+        assert_eq!(rest(&rx), [Step::Waiting { url: CLAUDE_URL.into(), opened: true, code_url: CLAUDE_URL.into() }, done(Some("someone@example.com"), Some("max"))]);
         assert_eq!(opened(&out), [CLAUDE_URL], "no automatic address: the printed manual page is opened");
         assert_eq!(login.pid(), None);
     }
@@ -1583,7 +1590,8 @@ mod tests {
         let _s = serial();
         let out = scratch("claude-code");
         let (login, rx) = begin(spec("claude", "console", None, None, &out, "code"), &out);
-        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true });
+        // "I have a code" before any is refused: the step names the printed page too, the one that shows a code
+        assert_eq!(next(&rx).to_json(), json!({"step": "waiting", "url": CLAUDE_AUTO_URL, "opened": true, "codeUrl": CLAUDE_URL}));
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the standing paste prompt is no step");
         assert_eq!(active(), Some(("claude".into(), "test-claude".into())));
         assert!(login.code("").is_err());
@@ -1604,7 +1612,7 @@ mod tests {
         let home = out.join("acct");
         fs::create_dir_all(&home).unwrap();
         let (login, rx) = begin(spec("claude", "browser", None, Some(&home), &out, "auto"), &out);
-        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: CLAUDE_AUTO_URL.into(), opened: true, code_url: CLAUDE_URL.into() });
         let pid = pid_in(&out, "claude.pid");
         assert_eq!(rest(&rx), [done(Some("someone@example.com"), Some("max"))], "the CLI printed nothing and never exited");
         assert!(gone(pid), "the CLI is stopped");
@@ -1759,7 +1767,7 @@ mod tests {
         let home = out.join("acct");
         fs::create_dir_all(&home).unwrap();
         let (login, rx) = begin(spec("codex", "browser", None, Some(&home), &out, "ok"), &out);
-        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/codex?state=s2".into(), opened: true },
+        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/codex?state=s2".into(), opened: true, code_url: String::new() },
                                done(Some("someone@example.com"), Some("plus"))]);
         assert_eq!(opened(&out), ["https://auth.example/codex?state=s2"], "the host opens the browser once");
         let env_names = fs::read_to_string(out.join("opened.env")).unwrap();
@@ -1777,7 +1785,7 @@ mod tests {
 
         let out = scratch("codex-fail");
         let (login, rx) = begin(spec("codex", "browser", None, None, &out, "fail"), &out);
-        assert_eq!(next(&rx), Step::Waiting { url: "https://auth.example/codex?state=s2".into(), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: "https://auth.example/codex?state=s2".into(), opened: true, code_url: String::new() });
         assert_eq!(login.code("x"), Err("Codex takes no code here".into()));
         assert_eq!(rest(&rx), [Step::Failed("Token exchange failed".into())]);
 
@@ -1796,7 +1804,7 @@ mod tests {
         let out = scratch("pi");
         let home = out.join("acct");
         let (_l, rx) = begin(spec("pi", "browser", Some("openai-codex"), Some(&home), &out, "browser"), &out);
-        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/pi?state=s4".into(), opened: true }, done(None, None)],
+        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/pi?state=s4".into(), opened: true, code_url: String::new() }, done(None, None)],
                    "the paste prompt raced against the browser is no step");
         assert_eq!(opened(&out), ["https://auth.example/pi?state=s4"]);
         let seen: Value = serde_json::from_slice(&fs::read(out.join("pi-login.json")).unwrap()).unwrap();
@@ -1868,7 +1876,7 @@ mod tests {
             let (login, rx) = begin(s, &out);
             let first = next(&rx);
             let pid = login.pid();
-            let Step::Waiting { url, opened } = &first else { panic!("{agent}: {first:?}") };
+            let Step::Waiting { url, opened, .. } = &first else { panic!("{agent}: {first:?}") };
             let addr = url.split('?').next().unwrap_or("");
             let keys: Vec<&str> = url.split_once('?').map(|q| q.1.split('&').filter_map(|kv| kv.split('=').next()).collect()).unwrap_or_default();
             eprintln!("{agent}: waiting after {} ms at {addr} (query keys {keys:?}), opened {opened}", t.elapsed().as_millis());
@@ -1920,7 +1928,7 @@ mod tests {
         let _s = serial();
         let out = scratch("opencode");
         let (_l, rx) = begin(spec("opencode", "browser", Some("openai"), None, &out, "ok"), &out);
-        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/opencode?state=s3".into(), opened: true }, done(None, None)]);
+        assert_eq!(rest(&rx), [Step::Waiting { url: "https://auth.example/opencode?state=s3".into(), opened: true, code_url: String::new() }, done(None, None)]);
         assert_eq!(opened(&out), ["https://auth.example/opencode?state=s3"]);
         assert_eq!(calls(&out), [json!({"what": "authorize", "provider": "openai", "body": {"method": 0}}),
                                  json!({"what": "callback", "provider": "openai", "body": {"method": 0}})]);
@@ -1934,7 +1942,7 @@ mod tests {
 
         let out = scratch("opencode-code");
         let (login, rx) = begin(spec("opencode", "browser", Some("anthropic"), None, &out, "ok"), &out);
-        assert_eq!(next(&rx), Step::Waiting { url: "https://claude.example/oauth".into(), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: "https://claude.example/oauth".into(), opened: true, code_url: String::new() });
         assert_eq!(next(&rx), Step::Code { url: "https://claude.example/oauth".into(), message: None }, "a code is the one way on");
         // a refused code, answered false or with opencode's 400, is asked for again
         for bad in ["bad#code", "refused#400"] {
@@ -2002,10 +2010,10 @@ mod tests {
         }
         let (login, rx) = begin(s, &out);
         let page = |n: u32| format!("https://claude.example/oauth?attempt={n}");
-        assert_eq!(next(&rx), Step::Waiting { url: page(1), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: page(1), opened: true, code_url: String::new() });
         assert_eq!(next(&rx), Step::Code { url: page(1), message: None });
         login.code("bad#code").unwrap();
-        assert_eq!(next(&rx), Step::Waiting { url: page(2), opened: true });
+        assert_eq!(next(&rx), Step::Waiting { url: page(2), opened: true, code_url: String::new() });
         assert_eq!(next(&rx), Step::Code { url: page(2), message: Some("That code didn't work. Here's a new page to sign in again.".into()) });
         login.code("good#code").unwrap();
         assert_eq!(rest(&rx), [done(None, None)]);

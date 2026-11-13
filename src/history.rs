@@ -2443,11 +2443,11 @@ pub struct LiveTasks {
     pub alive: bool,
 }
 
-// Since when a process has held the session open: a Claude Code process's ~/.claude/sessions
-// record (the host's own sessions have one too), else 0 when the host says its process is alive.
+// Since when a process has held the session open: a Claude Code process's session record (Personal's
+// or an account's; the host's own sessions have one too), else 0 when the host says its process is alive.
 fn held_since(id: &str, live: &LiveTasks) -> Option<u64> {
     if let Some(pid) = terminal_holder(id) {
-        let rec = fs::read(home().join(format!(".claude/sessions/{pid}.json"))).ok()
+        let rec = sources::record_dirs().iter().find_map(|d| fs::read(d.join(format!("{pid}.json"))).ok())
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         return Some(rec.and_then(|v| v["startedAt"].as_u64()).unwrap_or(0));
     }
