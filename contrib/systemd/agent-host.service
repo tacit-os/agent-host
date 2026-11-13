@@ -1,8 +1,10 @@
 [Unit]
 Description=Claude Code sessions for the desktop (agent-host)
 # Login-scoped on purpose, unlike the session's own daemons: an agent session outlives the window
-# that started it and a logout, and the next login attaches to the same sessions over the socket.
-# So no PartOf=tacit-session.target here - stopping this at logout would end work in progress.
+# that started it, and the next window attaches to the same sessions over the socket. Not a logout:
+# Tacit turns on no lingering, so once the last login is gone systemd stops the user's services, this
+# one and the agent-*.scope units it started, and the next login's host starts with no sessions.
+# No PartOf=tacit-session.target all the same - stopping this with the desktop would end work in progress.
 OnFailure=tacit-daemon-failed@%n.service
 
 [Service]
