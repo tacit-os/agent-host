@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Stands in for opencode in signin.rs's tests: --version, `auth list`, `auth logout <provider>` and
-# `serve` with GET /provider/auth and the provider oauth routes, behind OPENCODE_SERVER_PASSWORD.
+# `serve` with GET /provider/auth and the provider oauth routes, behind OPENCODE_SERVER_PASSWORD, and opencode 2's
+# /api/integration routes for a code sign-in to anthropic (a refused code fails its attempt, as 2's does).
 # FAKE_MODE: ok, fail (the callback is refused), hang (the callback never answers). Notes its pid
 # and each oauth call.
 import base64, json, os, sys, time
@@ -41,6 +42,7 @@ METHODS = {
     "github-copilot": [{"type": "oauth", "label": "Login with GitHub Copilot"}],
     "anthropic": [{"type": "api", "label": "API key"}, {"type": "oauth", "label": "Claude Pro/Max"}],
 }
+ATTEMPTS = {}  # opencode 2: attempt id -> pending, complete or failed
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -51,17 +53,25 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+    def empty(self, code):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
     def ok(self):
         if self.headers.get("Authorization") == want:
             return True
         self.reply(401, {"message": "unauthorized"})
     def do_GET(self):
         if self.ok():
+            if self.path.startswith("/api/"):
+                return self.v2(None)
             self.reply(200, METHODS) if self.path.startswith("/provider/auth") else self.reply(404, {"message": "not found"})
     def do_POST(self):
         if not self.ok():
             return
         b = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if self.path.startswith("/api/"):
+            return self.v2(b)
         _, pid, _, what = self.path.split("?")[0].strip("/").split("/")
         with open(os.path.join(out, "opencode-calls"), "a") as f:
             f.write(json.dumps({"what": what, "provider": pid, "body": b}) + "\n")
@@ -82,6 +92,28 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, False)
         time.sleep(0.2)
         self.reply(200, True)
+    # api/integration[/anthropic/connect/oauth[/<attempt>[/complete]]]; `b`: a POST's body
+    def v2(self, b):
+        p = self.path.split("?")[0].strip("/").split("/")
+        if p == ["api", "integration"]:
+            return self.reply(200, {"data": [{"id": "anthropic", "name": "Anthropic", "methods": [
+                {"type": "key", "id": "key", "label": "API key"}, {"type": "oauth", "id": "claude-pro", "label": "Claude Pro/Max"}]}]})
+        with open(os.path.join(out, "opencode-calls"), "a") as f:
+            f.write(json.dumps({"path": "/".join(p[5:]), "body": b}) + "\n")
+        if len(p) == 5:
+            n = str(len(ATTEMPTS) + 1)
+            ATTEMPTS["con_" + n] = "pending"
+            return self.reply(200, {"data": {"attemptID": "con_" + n, "url": "https://claude.example/oauth?attempt=" + n, "mode": "code",
+                                             "instructions": "Paste the authorization code here: "}})
+        if len(p) == 7:
+            # 2 answers a code for an attempt already settled with nothing, and fails a pending one on a refused code
+            if ATTEMPTS.get(p[5]) == "pending":
+                ATTEMPTS[p[5]] = "complete" if b.get("code") == "good#code" else "failed"
+                if ATTEMPTS[p[5]] == "failed":
+                    return self.reply(400, {"_tag": "InvalidRequestError", "message": "Invalid authorization code", "kind": "integration_authorization"})
+            return self.empty(204)
+        st = ATTEMPTS.get(p[5], "failed")
+        self.reply(200, {"data": {"status": st, "message": "Invalid authorization code"} if st == "failed" else {"status": st}})
 srv = HTTPServer(("127.0.0.1", port), H)
 if out:
     open(os.path.join(out, "opencode.pid"), "w").write(str(os.getpid()))

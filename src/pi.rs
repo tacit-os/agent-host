@@ -76,6 +76,7 @@ fn started(s: &mut Session, to: std::sync::mpsc::Sender<String>, pid: u32) {
     s.last = Instant::now();
     s.stderr.clear();
     s.closing = None;
+    s.ended = None;
     s.live.clear();
     s.calls.clear();
     s.native.clear();

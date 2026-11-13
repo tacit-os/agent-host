@@ -10,7 +10,7 @@
 //!   opencode     a short-lived `opencode serve` on 127.0.0.1 behind a random password:
 //!                POST /provider/{id}/oauth/authorize, then …/oauth/callback. The host opens the URL.
 //!                opencode 2: POST /api/integration/{id}/connect/oauth, then its attempt's status until
-//!                complete (a pasted code first goes to …/complete).
+//!                complete (a pasted code first goes to …/complete; a refused one starts a new attempt).
 //!
 //! One sign-in runs at a time: a second one gets Busy naming the agent that holds the first. Codex,
 //! pi and opencode all take 127.0.0.1:1455 for a ChatGPT sign-in in the browser, so that one also
@@ -1140,17 +1140,22 @@ fn opencode2_login(r: &Arc<Run>, spec: &LoginSpec, port: u16, auth: &str, provid
         body["answer"] = answer;
     }
     let base = format!("/api/integration/{id}/connect/oauth");
-    let a = http(port, auth, "POST", &base, Some(&body), Some(Duration::from_secs(60)))?["data"].take();
-    let attempt = a["attemptID"].as_str().ok_or("opencode started no sign-in")?.to_string();
-    let url = a["url"].as_str().unwrap_or("").to_string();
-    let by_code = a["mode"] == "code";
-    match a["instructions"].as_str().and_then(code_in) {
-        Some(code) if !by_code => r.step(Step::Device { url, user_code: code }),
-        _ => {
-            let opened = !url.is_empty() && open(spec, &url);
-            r.step(Step::Waiting { url, opened });
+    // an attempt, its page opened (or its device code shown): its id, and whether a pasted code finishes it
+    let connect = || -> Result<(String, bool), String> {
+        let a = http(port, auth, "POST", &base, Some(&body), Some(Duration::from_secs(60)))?["data"].take();
+        let attempt = a["attemptID"].as_str().ok_or("opencode started no sign-in")?.to_string();
+        let url = a["url"].as_str().unwrap_or("").to_string();
+        let by_code = a["mode"] == "code";
+        match a["instructions"].as_str().and_then(code_in) {
+            Some(code) if !by_code => r.step(Step::Device { url, user_code: code }),
+            _ => {
+                let opened = !url.is_empty() && open(spec, &url);
+                r.step(Step::Waiting { url, opened });
+            }
         }
-    }
+        Ok((attempt, by_code))
+    };
+    let (mut attempt, by_code) = connect()?;
     if by_code {
         {
             let ended = r.ended.lock().unwrap();
@@ -1160,9 +1165,20 @@ fn opencode2_login(r: &Arc<Run>, spec: &LoginSpec, port: u16, auth: &str, provid
             *r.input.lock().unwrap() = Input::Codes(code_tx);
         }
         r.ask_code(None);
-        let code = codes.recv().map_err(|_| "This sign-in has ended".to_string())?;
+        // A refused code fails its attempt for good (2 marks it failed, and takes no other code for it), so a new attempt
+        // starts, with its own page, and its code is asked for. A lost connection to opencode (http's "opencode: …") ends it.
+        loop {
+            let code = codes.recv().map_err(|_| "This sign-in has ended".to_string())?;
+            match http(port, auth, "POST", &format!("{base}/{attempt}/complete"), Some(&json!({"code": code})), Some(Duration::from_secs(60))) {
+                Ok(_) => break,
+                Err(e) if e.starts_with("opencode: ") => return Err(e),
+                Err(_) => {
+                    attempt = connect()?.0;
+                    r.ask_code(Some("That code didn't work. Here's a new page to sign in again.".into()));
+                }
+            }
+        }
         *r.input.lock().unwrap() = Input::None;
-        http(port, auth, "POST", &format!("{base}/{attempt}/complete"), Some(&json!({"code": code})), Some(Duration::from_secs(60)))?;
     }
     // the browser or the device page finishes it; the server's end (a cancel, the timeout) ends this too
     loop {
@@ -1966,6 +1982,37 @@ mod tests {
         let (_l, rx) = begin(s, &out);
         assert!(t.elapsed() < Duration::from_secs(1), "the start took {:?}", t.elapsed());
         assert_eq!(rest(&rx).last(), Some(&done(None, None)));
+    }
+
+    // opencode 2's code sign-in: a refused code has failed its attempt for good, so a new one starts, its page opened,
+    // and its code is asked for with "That code didn't work…"; the next code goes to the new attempt.
+    #[test]
+    fn opencode2_asks_again_on_a_new_page() {
+        let _s = serial();
+        let out = scratch("opencode2-code");
+        // a binary of its own that says it is 2 (major() keeps a version per binary)
+        let bin = out.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let two = format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'opencode v2.1.1'; exit 0; }}\nexec {} \"$@\"\n", fakes("bin").join("opencode").display());
+        fs::write(bin.join("opencode"), two).unwrap();
+        fs::set_permissions(bin.join("opencode"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut s = spec("opencode", "browser", Some("anthropic"), None, &out, "ok");
+        for (_, v) in s.env.iter_mut().filter(|(k, _)| k == "PATH") {
+            *v = format!("{}:{v}", bin.display());
+        }
+        let (login, rx) = begin(s, &out);
+        let page = |n: u32| format!("https://claude.example/oauth?attempt={n}");
+        assert_eq!(next(&rx), Step::Waiting { url: page(1), opened: true });
+        assert_eq!(next(&rx), Step::Code { url: page(1), message: None });
+        login.code("bad#code").unwrap();
+        assert_eq!(next(&rx), Step::Waiting { url: page(2), opened: true });
+        assert_eq!(next(&rx), Step::Code { url: page(2), message: Some("That code didn't work. Here's a new page to sign in again.".into()) });
+        login.code("good#code").unwrap();
+        assert_eq!(rest(&rx), [done(None, None)]);
+        assert_eq!(opened(&out), [page(1), page(2)]);
+        let calls: Vec<Value> = calls(&out).into_iter().take(4).collect();
+        assert_eq!(calls, [json!({"path": "", "body": {"methodID": "claude-pro"}}), json!({"path": "con_1/complete", "body": {"code": "bad#code"}}),
+                           json!({"path": "", "body": {"methodID": "claude-pro"}}), json!({"path": "con_2/complete", "body": {"code": "good#code"}})]);
     }
 
     #[test]

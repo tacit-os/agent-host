@@ -1336,11 +1336,24 @@ fn result_text(c: &Value) -> String {
     c.as_array().map(|a| a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()
 }
 
+// Claude Code's result for a Write over a file that was there ("The file <path> has been updated successfully."); a new
+// file's is "File created successfully at: <path>".
+fn overwrote(result: &str) -> bool {
+    result.starts_with("The file ") && result.contains(" has been updated")
+}
+
 fn attach(items: &mut Vec<Value>, calls: &HashMap<String, usize>, id: &str, content: &Value, error: bool, media: bool) {
-    let result = clip_result(result_text(content).trim(), 400);
+    let text = result_text(content);
+    let result = clip_result(text.trim(), 400);
     let pics = if media { images(content) } else { Vec::new() };
     match calls.get(id) {
         Some(&i) => {
+            // a Write over a file that was there is an edit of it, not a new file
+            if !error && items[i]["tool"] == "Write" && overwrote(&text) {
+                for f in items[i]["files"].as_array_mut().into_iter().flatten() {
+                    f["kind"] = json!("edit");
+                }
+            }
             items[i]["result"] = Value::String(result);
             items[i]["error"] = Value::Bool(error);
             if !pics.is_empty() {
@@ -1954,7 +1967,8 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
             break;
         }
         // An edit the agent was refused or that failed changed nothing. One counted before its result was
-        // written (`open`) is taken back when the result, read later, says it failed.
+        // written (`open`) is taken back when the result, read later, says it failed; a Write's that it updated a
+        // file that was there is an edit, not a file made.
         if item["kind"] == "result" {
             let id = item["id"].as_str().unwrap_or("");
             if let Some(i) = open.iter().position(|(o, _, _)| o == id) {
@@ -1976,6 +1990,16 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
                             made.retain(|m| !(m["path"] == p && m["at"] == ts));
                         }
                     }
+                } else if overwrote(item["result"].as_str().unwrap_or("")) {
+                    for f in edited.as_array().into_iter().flatten().filter(|f| f["kind"] == "write") {
+                        let p = f["path"].as_str().unwrap_or("");
+                        made.retain(|m| !(m["path"] == p && m["at"] == ts));
+                        if f["new"] == true {
+                            if let Some(x) = files.iter_mut().find(|x| x["path"] == p) {
+                                x["created"] = json!(false);
+                            }
+                        }
+                    }
                 }
             }
             continue;
@@ -1984,10 +2008,9 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
             continue;
         }
         let ts = item["ts"].as_u64().unwrap_or(0);
-        if item["files"].is_array() && item.get("result").is_none() {
-            open.push((item["id"].as_str().unwrap_or("").to_string(), item["files"].clone(), ts));
-        }
-        for f in item["files"].as_array().into_iter().flatten() {
+        // as counted, each file this call was the first to touch marked new (whose `created` it set)
+        let mut edited = item["files"].clone();
+        for (j, f) in item["files"].as_array().into_iter().flatten().enumerate() {
             let p = f["path"].as_str().unwrap_or("");
             if f["kind"] == "write" {
                 made_at(&mut made, p, ts, "tool");
@@ -1996,6 +2019,7 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
                 Some(i) => i,
                 None => {
                     files.push(json!({"path": p, "add": 0, "del": 0, "edits": 0, "created": f["kind"] == "write", "deleted": false}));
+                    edited[j]["new"] = json!(true);
                     files.len() - 1
                 }
             };
@@ -2004,6 +2028,9 @@ pub fn changes(path: &Path, tool: &str, before: Option<&str>) -> Value {
             x["del"] = json!(x["del"].as_u64().unwrap_or(0) + f["del"].as_u64().unwrap_or(0));
             x["edits"] = json!(x["edits"].as_u64().unwrap_or(0) + 1);
             x["deleted"] = json!(f["kind"] == "delete");
+        }
+        if item["files"].is_array() && item.get("result").is_none() {
+            open.push((item["id"].as_str().unwrap_or("").to_string(), edited, ts));
         }
     }
     // images Codex generated: saved_path on an image_generation_end event, savedPath on a v2
@@ -3330,6 +3357,45 @@ mod tests {
         let got = changes(&file, "claude", None);
         let names: Vec<&str> = got["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["/x/kept.toml"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A Write over a file that was there (Claude Code's result: "has been updated successfully") is an edit of it, in
+    // its item (the activity line's kind) and in the changes record, not a file made; also when its result is read on a
+    // later call than the Write. One that made its file is a new file as before.
+    #[test]
+    fn a_write_over_a_file_that_was_there_is_an_edit() {
+        let dir = scratch("overwrite");
+        let file = dir.join("overwrite-test.jsonl");
+        let ts = "2026-10-25T00:00:00.000Z";
+        let call = |id: &str, p: &str| json!({"type": "assistant", "timestamp": ts,
+            "message": {"content": [{"type": "tool_use", "id": id, "name": "Write", "input": {"file_path": p, "content": "one\ntwo"}}]}}).to_string();
+        let result = |id: &str, text: String| json!({"type": "user", "timestamp": ts,
+            "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": text}]}}).to_string();
+        let made = |p: &str| format!("File created successfully at: {p} (file state is current in your context — no need to Read it back)");
+        let updated = |p: &str| format!("The file {p} has been updated successfully. (file state is current in your context — no need to Read it back)");
+        let paths: Vec<String> = ["new.txt", "config.json", "README.md"].iter().map(|n| dir.join(n).to_string_lossy().into_owned()).collect();
+        for p in &paths {
+            fs::write(p, "one\ntwo").unwrap(); // a made file is listed while it is there
+        }
+        let (new, old, later) = (paths[0].as_str(), paths[1].as_str(), paths[2].as_str());
+        let lines = [call("w1", new), result("w1", made(new)), call("w2", old), result("w2", updated(old)), call("w3", later)];
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let (items, _) = transcript_from(&file, "claude", 0, false);
+        let kinds: Vec<&str> = items.iter().filter_map(|i| i["files"][0]["kind"].as_str()).collect();
+        assert_eq!(kinds, ["write", "edit", "write"]);
+        let created = |got: &Value| -> Vec<(String, bool)> {
+            got["files"].as_array().unwrap().iter().map(|f| (f["path"].as_str().unwrap().to_string(), f["created"] == true)).collect()
+        };
+        let got = changes(&file, "claude", None);
+        assert_eq!(created(&got), [(new.into(), true), (old.into(), false), (later.into(), true)]);
+        // the third Write's result, on the next read: it updated a file that was there
+        let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut f, (result("w3", updated(later)) + "\n").as_bytes()).unwrap();
+        let got = changes(&file, "claude", None);
+        assert_eq!(created(&got), [(new.into(), true), (old.into(), false), (later.into(), false)]);
+        let made: Vec<&str> = got["made"].as_array().unwrap().iter().filter_map(|m| m["path"].as_str()).collect();
+        assert_eq!(made, [new]);
         let _ = fs::remove_dir_all(&dir);
     }
 

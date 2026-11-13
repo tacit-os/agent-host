@@ -8,7 +8,7 @@
 //!   → {"op":"hello","proto":5}   (this connection also gets pi and opencode history rows, with the protocol 5 fields)
 //!   → {"op":"list"}   {"op":"info","id":ID}
 //!   → {"op":"start","cwd":DIR,"text":?,"resume":?ID,"id":?ID,"model":?,"mode":?,"agent":?TOOL,"files":?[PATH],"images":?[PATH]}
-//!   → {"op":"fork","id":ID}   {"op":"delete","id":ID}   ← {"ev":"forked","id":NEW,"from":ID,"tool":T}   {"ev":"deleted","id":ID,"how":"trash"|"archive"}
+//!   → {"op":"fork","id":ID}   {"op":"delete","id":ID,"stop":?BOOL}   ← {"ev":"forked","id":NEW,"from":ID,"tool":T}   {"ev":"deleted","id":ID,"how":"trash"|"archive"}
 //!   → {"op":"send","id":ID,"text":TEXT,"images":?[PATH]}
 //!   → {"op":"answer","id":ID,"request":RID,"allow":BOOL,"input":?,"permissions":?,"message":?}
 //!   → {"op":"stop_task","id":ID,"task":TASK}   (one background agent, workflow run or command)
@@ -23,7 +23,8 @@
 //!   ← {"ev":"items","id":ID,"items":[..]}   (watchers: the running process's messages in transcript item form)
 //!   ← {"ev":"hello","version":V,"proto":N,"sessions":[..],"agents":{TOOL:{installed,version,signedIn,reason,caps}}}   {"ev":"sessions","sessions":[..]}   {"ev":"state","session":{..}}   {"ev":"started","id":ID,"tool":T}
 //!   ← {"ev":"event","id":ID,"seq":N,"data":<claude's own JSON line, or another agent's in Claude Code's shape>,"native":?<that agent's own message>}   (watchers only)
-//!   ← {"ev":"exit","id":ID,"code":N,"reason":"idle"|"closed"|"exited"|"crashed"|"signedOut"|"expired","stderr":[..]}   {"ev":"ok"}   {"ev":"error","message":..}
+//!   ← {"ev":"exit","id":ID,"code":N,"reason":"idle"|"closed"|"exited"|"crashed"|"signedOut"|"expired","stderr":[..],"ended":?"oom"}   {"ev":"ok"}   {"ev":"error","message":..}
+//!     (ended "oom": the kernel's out-of-memory killer ended it, and the session's state says so until its next process)
 //! Protocol 6 (hello `features`: accounts, catalog, effort; accounts.rs):
 //!   → {"op":"start",..,"account":?ID,"effort":?E}   (omitted fields from the folder's defaults, then everywhere's, then the agent's own)
 //!   → {"op":"effort","id":ID,"effort":E}   {"op":"model","id":ID,"model":"default"}   {"op":"settings","id":ID}   (Claude Code's get_settings)
@@ -98,6 +99,7 @@ struct Session {
     stopping: HashMap<String, String>, // stop_task request id -> task
     auth: Option<&'static str>, // its process said its sign-in is gone ("signedOut" | "expired")
     limited: Option<(u64, String)>, // the plan's usage limit stopped it: when that resets (unix s, 0: not said), on which account
+    ended: Option<&'static str>, // its last process was ended by the out-of-memory killer ("oom"), until the next starts
     state: &'static str, // "working" | "waiting" | "idle"
     used: bool,          // has a transcript, so a restart must --resume
     to_child: Option<Sender<String>>, // lines for the process's stdin: its writer thread has it
@@ -144,6 +146,7 @@ impl Session {
             stopping: HashMap::new(),
             auth: None,
             limited: None,
+            ended: None,
             state: "idle",
             used: false,
             to_child: None,
@@ -175,6 +178,9 @@ impl Session {
         }
         if let Some(at) = self.limit(now_ms()) {
             s["limited"] = json!({"resetsAt": (at > 0).then_some(at)});
+        }
+        if let Some(e) = self.ended {
+            s["ended"] = json!(e);
         }
         s
     }
@@ -436,6 +442,7 @@ fn spawn(shared: &Shared, h: &mut Host, id: &str) -> Result<(), String> {
     s.tasks.clear();
     s.stopping.clear();
     s.auth = None;
+    s.ended = None;
     // The app gives each background agent, workflow and command its own Stop (stop_task), so the
     // turn's interrupt is declared to spare them: without this it kills them all.
     let init = json!({"type": "control_request", "request_id": format!("host-init-{gen}"),
@@ -475,13 +482,29 @@ fn each_line(r: impl std::io::Read, mut f: impl FnMut(String)) {
     }
 }
 
-fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut child: Child) {
+fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, child: Child) {
+    read_out_in(shared, id, gen, out, child, Path::new("/sys/fs/cgroup"));
+}
+
+// `cgroups`: where the cgroup tree is (a test's copy of it).
+fn read_out_in<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut child: Child, cgroups: &Path) {
+    // the process's scope, found at its first line: systemd-run has moved into the scope before it starts the agent
+    let (pid, mut scope, began) = (child.id(), None, now_ms() / 1000);
     each_line(out, |line| {
+        if scope.is_none() {
+            scope = Some(scope_of(cgroups, pid));
+        }
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             on_event(&mut shared.lock().unwrap(), &id, gen, v);
         }
     });
+    // Read at once: systemd removes the scope a few ms after its last process has gone (--collect), its count with it
+    let events = scope.flatten().map(|d| (fs::read_to_string(d.join("memory.events")).ok(), d));
     let code = child.wait().ok().and_then(|s| s.code());
+    // An out-of-memory kill in the scope ends the session either way: the agent's own, or systemd stopping the scope
+    // after another process's (OOMPolicy=stop). Asked only of an exit the host did not ask for, outside its lock.
+    let asked = shared.lock().unwrap().sessions.get(&id).is_none_or(|s| s.gen != gen || s.closing.is_some() || s.auth.is_some());
+    let oom = !asked && events.is_some_and(|(e, d)| e.map_or_else(|| oom_logged(&d, began), |e| oom_kills(&e) > 0));
     let mut h = shared.lock().unwrap();
     // The exit code alone misleads: after an interrupted turn, closing stdin exits with 1.
     let (reason, stderr): (&str, Vec<String>) = match h.sessions.get_mut(&id) {
@@ -503,7 +526,9 @@ fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut 
             s.calls.clear();
             s.tasks.clear();
             s.stopping.clear();
-            match (s.closing.take(), s.auth.take()) {
+            let (closing, auth) = (s.closing.take(), s.auth.take());
+            s.ended = (oom && closing.is_none() && auth.is_none()).then_some("oom");
+            match (closing, auth) {
                 (Some(r), _) => (r, Vec::new()),
                 (None, Some(r)) => (r, s.stderr.iter().cloned().collect()),
                 (None, None) if code == Some(0) => ("exited", Vec::new()),
@@ -512,7 +537,11 @@ fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut 
         }
         _ => return,
     };
-    h.to_all(&json!({"ev": "exit", "id": id, "code": code, "reason": reason, "stderr": stderr}));
+    let mut exit = json!({"ev": "exit", "id": id, "code": code, "reason": reason, "stderr": stderr});
+    if let Some(e) = h.sessions.get(&id).and_then(|s| s.ended) {
+        exit["ended"] = json!(e);
+    }
+    h.to_all(&exit);
     // what the session still owed a client is answered, so nobody waits for it
     let owed: Vec<String> = h.replies.iter().filter(|(_, r)| r.2 == id).map(|(k, _)| k.clone()).collect();
     for rid in owed {
@@ -522,6 +551,35 @@ fn read_out<R: std::io::Read>(shared: Shared, id: String, gen: u64, out: R, mut 
         }
     }
     h.announce(&id);
+}
+
+// The cgroup of the scope process `pid` runs in, under `cgroups`; None outside a scope (the host's own service).
+fn scope_of(cgroups: &Path, pid: u32) -> Option<PathBuf> {
+    let cg = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let path = cg.lines().find_map(|l| l.strip_prefix("0::"))?;
+    path.ends_with(".scope").then(|| cgroups.join(path.trim_start_matches('/')))
+}
+
+// How many processes the out-of-memory killer has ended in a scope, from its memory.events (oom_kill).
+fn oom_kills(events: &str) -> u64 {
+    events.lines().find_map(|l| l.strip_prefix("oom_kill ")?.trim().parse().ok()).unwrap_or(0)
+}
+
+// Whether systemd logged that the out-of-memory killer ended processes in the scope `dir` was (its unit) since `since`
+// (unix s), when the scope has gone: SD_MESSAGE_UNIT_OUT_OF_MEMORY in the user journal, written as systemd saw the kill,
+// before it removed the scope. Asked again briefly for a record journald has not written yet; no journal reads as none.
+fn oom_logged(dir: &Path, since: u64) -> bool {
+    let Some(unit) = dir.file_name().and_then(|u| u.to_str()) else { return false };
+    for _ in 0..10 {
+        let out = Command::new("journalctl").args(["--user", "--no-pager", "-q", "-o", "cat", "-u", unit, "MESSAGE_ID=fe6faa94e7774663a0da52717891d8ef"])
+            .arg(format!("--since=@{}", since.saturating_sub(1))).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        match out {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => return true,
+            Ok(o) if o.status.success() => thread::sleep(Duration::from_millis(50)),
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn read_err(shared: Shared, id: String, gen: u64, err: ChildStderr) {
@@ -1425,10 +1483,23 @@ fn held_by(pid: u32, id: &str) -> String {
 // theirs, archived (their own way of hiding a session, which can be undone in them).
 fn delete(shared: &Shared, past: &Past, req: &Value) -> Result<Value, String> {
     let id = req["id"].as_str().ok_or("delete needs an id")?;
-    // refused before anything is stopped: a terminal that has the session open (the host's own process for it is not one)
+    // refused before anything is stopped: a terminal that has the session open (the host's own process for it is not one).
+    // With `stop`, a turn the previous host's process is finishing is ended first, as Praxis's Stop ends it (TERM to
+    // that process), and waited for.
     let own = shared.lock().unwrap().sessions.get(id).map_or(0, |s| s.pid);
-    if let Some(pid) = history::holder_outside(id, own) {
-        return Err(held_by(pid, id));
+    let (stop, until, mut ended) = (req["stop"] == true, Instant::now() + Duration::from_secs(20), None);
+    while let Some(pid) = history::holder_outside(id, own) {
+        if ended != Some(pid) {
+            if !stop || !history::in_session_scope(pid, id) {
+                return Err(held_by(pid, id));
+            }
+            let _ = Command::new("kill").args(["-s", "TERM", "--", &pid.to_string()]).stdin(Stdio::null()).stderr(Stdio::null()).status();
+            ended = Some(pid);
+        }
+        if Instant::now() > until {
+            return Err("The session is still closing; try again.".into());
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     // a live session is closed first (a running Codex or opencode turn is stopped), and its process
     // waited for, so nothing writes its files after they have gone
@@ -1920,6 +1991,82 @@ mod tests {
         assert_eq!((s.pid, s.stderr.iter().cloned().collect::<Vec<_>>()), (0, vec!["bad \u{FFFD} byte".to_string(), "later".to_string()]));
     }
 
+    // The exit a session's process ended with, and its state after: what read_out tells clients.
+    fn exit_and_state(shared: &Shared, id: &str, mut child: Child, cgroups: &Path) -> (Value, Value) {
+        let (a, b) = UnixStream::pair().unwrap();
+        shared.lock().unwrap().clients.insert(1, Client { out: a, watching: HashSet::new(), proto: 5, history: 0, accounts: false });
+        let stdout = child.stdout.take().unwrap();
+        read_out_in(shared.clone(), id.into(), 1, stdout, child, cgroups);
+        b.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let exit = BufReader::new(b).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok())
+            .find(|v| v["ev"] == "exit").expect("an exit");
+        let state = shared.lock().unwrap().sessions[id].summary();
+        (exit, state)
+    }
+
+    // A process the out-of-memory killer ended leaves its session saying so: ended "oom" on its exit and in its state,
+    // from its scope's memory.events (a copy of the cgroup tree here, with the count in it). Another crash does not,
+    // nor a process the host closed. Runs where the test's children are in a scope (a terminal's, or agent-host's).
+    #[test]
+    fn an_out_of_memory_kill_is_said() {
+        let root = env::temp_dir().join(format!("agent-host-cgroups-{}", process::id()));
+        for (n, (kills, closing, reason, ended)) in [(1, None, "crashed", Some("oom")), (0, None, "crashed", None), (1, Some("idle"), "idle", None)]
+            .into_iter().enumerate() {
+            let id = format!("4a0f1c2e-0000-4000-8000-00000000d10{n}");
+            let shared: Shared = Arc::new(Mutex::new(Host::default()));
+            let mut s = Session::new(&id, "/", "claude");
+            (s.gen, s.pid, s.closing) = (1, 1, closing);
+            shared.lock().unwrap().sessions.insert(id.clone(), s);
+            // its first line, then killed once the test lets go of its stdin
+            let mut child = Command::new("sh").args(["-c", r#"echo '{"type": "system", "subtype": "init", "model": "m"}'; read x; kill -9 $$"#])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let Some(scope) = scope_of(&root, child.id()) else {
+                eprintln!("an_out_of_memory_kill_is_said: the test does not run in a scope, so there is nothing to read");
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            };
+            fs::create_dir_all(&scope).unwrap();
+            fs::write(scope.join("memory.events"), format!("low 0\nhigh 40\nmax 12\noom 1\noom_kill {kills}\noom_group_kill 0\n")).unwrap();
+            let stdin = child.stdin.take();
+            let (sh, i, r) = (shared.clone(), id.clone(), root.clone());
+            let reader = thread::spawn(move || exit_and_state(&sh, &i, child, &r));
+            let until = Instant::now() + Duration::from_secs(5);
+            while shared.lock().unwrap().sessions[&id].model != "m" && Instant::now() < until {
+                thread::sleep(Duration::from_millis(10));
+            }
+            drop(stdin);
+            let (exit, state) = reader.join().unwrap();
+            assert_eq!((exit["reason"].as_str(), exit["ended"].as_str(), state["ended"].as_str()), (Some(reason), ended, ended), "case {n}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // A real out-of-memory kill, in a real scope with a 64 MB cap, and a real kill that is not one: cargo test --
+    // --ignored a_real_out_of_memory_kill. The scope is often gone before its memory.events is read; then the journal says.
+    #[test]
+    #[ignore = "runs a real systemd scope"]
+    fn a_real_out_of_memory_kill_is_said() {
+        let fill = r#"import time; print('{"type": "system", "subtype": "init"}', flush=True); time.sleep(0.5); x = bytearray(b"x") * (512 << 20)"#;
+        let die = r#"import os, time; print('{"type": "system", "subtype": "init"}', flush=True); time.sleep(0.5); os.kill(os.getpid(), 9)"#;
+        for (n, (script, ended)) in [(fill, json!("oom")), (die, Value::Null)].into_iter().enumerate() {
+            let id = format!("4a0f1c2e-0000-4000-8000-00000000d10{}", 7 + n);
+            let shared: Shared = Arc::new(Mutex::new(Host::default()));
+            let mut s = Session::new(&id, "/", "claude");
+            (s.gen, s.pid) = (1, 1);
+            shared.lock().unwrap().sessions.insert(id.clone(), s);
+            let mut child = Command::new("systemd-run")
+                .args(["--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0"])
+                .arg(format!("--unit=agent-test-oom-{}-{n}", process::id())).args(["--", "python3", "-c", script])
+                .stdout(Stdio::piped()).spawn().unwrap();
+            let out = child.stdout.take().unwrap();
+            let t = Instant::now();
+            read_out(shared.clone(), id.clone(), 1, out, child);
+            eprintln!("case {n}: read in {:?}", t.elapsed());
+            assert_eq!(shared.lock().unwrap().sessions[&id].summary()["ended"], ended, "case {n}");
+        }
+    }
+
     // A delete refused for the process a previous host started for the session, still finishing its turn, says so
     // instead of "Open in a terminal". That process runs in the session's own agent scope, and the holder here is a
     // child of the test, in the test's scope: the leftover half runs only where the test runs in an agent-host scope
@@ -1928,11 +2075,8 @@ mod tests {
     fn a_previous_hosts_turn_is_not_called_a_terminal() {
         let home = scratch_home();
         let past: Past = Arc::new(Mutex::new(History::default()));
-        let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let scope = cgroup.trim().rsplit('/').next().and_then(|u| u.strip_prefix("agent-")).and_then(|u| u.get(..8))
-            .filter(|s| s.chars().all(|c| c.is_ascii_hexdigit())).map(str::to_string);
         let mut cases = vec![("4a0f1c2e-0000-4000-8000-00000000d005".to_string(), "Open in a terminal")];
-        if let Some(short) = scope {
+        if let Some(short) = own_scope() {
             cases.push((format!("{short}-0000-4000-8000-00000000d005"), "Still finishing a turn from before the background service restarted"));
         }
         for (id, said) in cases {
@@ -1944,6 +2088,42 @@ mod tests {
             let _ = child.wait();
             assert_eq!(r.unwrap_err(), said);
         }
+    }
+
+    // The first 8 characters of the agent-host scope the test runs in (a session id's that names it), if it runs in one.
+    fn own_scope() -> Option<String> {
+        let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        cgroup.trim().rsplit('/').next().and_then(|u| u.strip_prefix("agent-")).and_then(|u| u.get(..8))
+            .filter(|s| s.chars().all(|c| c.is_ascii_hexdigit())).map(str::to_string)
+    }
+
+    // A delete with stop ends the turn a previous host's process is finishing, with TERM as Praxis's Stop does, waits for
+    // it and goes on; a terminal's process it never ends. The leftover half runs only where the test runs in an
+    // agent-host scope, as above.
+    #[test]
+    fn a_delete_with_stop_ends_a_previous_hosts_turn() {
+        use std::os::unix::process::ExitStatusExt;
+        let home = scratch_home();
+        let past: Past = Arc::new(Mutex::new(History::default()));
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let id = "4a0f1c2e-0000-4000-8000-00000000d006";
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        hold(&home, id, child.id());
+        let r = delete(&shared, &past, &json!({"op": "delete", "id": id, "stop": true}));
+        let alive = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!((r.unwrap_err().as_str(), alive), ("Open in a terminal", true), "a terminal's process is left running");
+        let Some(short) = own_scope() else { return };
+        let id = format!("{short}-0000-4000-8000-00000000d006");
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        hold(&home, &id, child.id());
+        // reaped once it ends, as systemd reaps the previous host's process
+        let waited = thread::spawn(move || child.wait().unwrap());
+        let r = delete(&shared, &past, &json!({"op": "delete", "id": id, "stop": true}));
+        let status = waited.join().unwrap();
+        assert_eq!(r.unwrap_err(), format!("no transcript for {id}"), "past the turn, the delete goes on (to a transcript this test has not)");
+        assert_eq!(status.signal(), Some(15), "the turn is ended by TERM");
     }
 
     #[test]
