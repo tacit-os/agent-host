@@ -1,0 +1,16 @@
+#!/bin/sh
+# Stands in for pacman's queries in install.rs's tests (the pkexec fake stands in for the install itself).
+# FAKE_PACMAN: unset (Node.js can be added), waiting (updates are waiting), upgrade (an older nodejs is installed),
+# missing (not in this computer's lists).
+case "$1" in
+-Sp)
+    [ "$FAKE_PACMAN" = missing ] && { echo "error: target not found: nodejs" >&2; exit 1; }
+    echo nodejs; echo npm ;;
+-Qq)
+    echo bash; echo pacman
+    [ "$FAKE_PACMAN" = upgrade ] && echo nodejs ;;
+-Qu)
+    [ "$FAKE_PACMAN" = waiting ] && { echo "linux 6.17.1.arch1-1 -> 6.17.2.arch1-1"; exit 0; }
+    exit 1 ;;
+esac
+exit 0

@@ -2,10 +2,12 @@
 //!   Claude Code  `curl -fsSL https://claude.ai/install.sh | bash`
 //!   Codex, pi, opencode  `npm i -g --prefix ~/.local --allow-scripts=<package> <package>` (npm 12 runs no install
 //!                script by default, and opencode's fetches its program); with no npm, first
-//!                `pkexec pacman -S --needed --noconfirm nodejs npm` through the desktop's polkit agent.
+//!                `pkexec pacman -S --needed --noconfirm nodejs npm` through the desktop's polkit agent, by the Apps
+//!                window's rule (node_ready): never -Sy, and refused when it would upgrade what is installed.
 //! An agent found on PATH outside the home folder, or root-owned, is installed for everyone
 //! (route "system") and is never installed or updated here, so two copies never end up on PATH.
-//! One install runs at a time. Each step's output reaches `on` a line at a time; the last step
+//! One install runs at a time. Each step's output reaches `on` a line at a time (the Node.js step's
+//! as the one line "Getting Node.js for <agent>…"); the last step
 //! is Done, Failed, Cancelled or NeedsNode. Cancel kills the step's process group and the steps
 //! after it never start. pacman, once pkexec has authorised it, runs as root and cannot be
 //! signalled: cancel then returns at once and sends Cancelled, and pacman is left to finish,
@@ -14,6 +16,7 @@
 
 use crate::signin::{command, drained, output, plain, read_lines, spawn, Proc};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -223,7 +226,7 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
                     run.end(InstallStep::NeedsNode);
                     return Ok(Install { run });
                 }
-                steps.push(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "nodejs", "npm"].map(String::from).to_vec());
+                steps.push(NODE.map(String::from).to_vec());
             }
             // 1.x under its old name holds the same `opencode` command, and npm will not link over another package's
             if agent == "opencode" && local.join("lib/node_modules/opencode-ai").exists() {
@@ -234,12 +237,17 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
         }
     }
     let (r, env, bin) = (run.clone(), env.to_vec(), local.join("bin").join(agent));
+    let getting = format!("Getting Node.js for {}…", if agent == "codex" { "Codex" } else { agent });
     thread::spawn(move || {
         for argv in steps {
             if r.state.lock().unwrap().ended {
                 return;
             }
-            if let Err(e) = run_step(&r, &argv, &env) {
+            let node = argv[0] == NODE[0]; // the one step run as root
+            if node {
+                r.step(InstallStep::Running { line: getting.clone() });
+            }
+            if let Err(e) = if node { node_ready(&env) } else { Ok(()) }.and_then(|_| run_step(&r, &argv, &env, node)) {
                 r.end(InstallStep::Failed(e));
                 return;
             }
@@ -253,6 +261,25 @@ fn install_in(agent: &str, with_node: bool, on: Box<dyn Fn(InstallStep) + Send>,
     Ok(Install { run })
 }
 
+// Node.js is got as the Apps window gets an app (the shell's scripts/store/stored.py): this computer's package lists
+// are refreshed only by the system update, never with -Sy alone, and an install that would upgrade a package that is
+// installed, or one made while updates are waiting, would leave the system half updated.
+const NODE: [&str; 7] = ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "nodejs", "npm"];
+const NODE_UPDATE: &str = "Node.js needs a system update first";
+
+// Err(NODE_UPDATE): Node.js is not in this computer's lists, adding it would upgrade an installed package, or updates
+// are waiting. pacman's queries only: no password, nothing refreshed.
+fn node_ready(env: &[(String, String)]) -> Result<(), String> {
+    let pacman = |args: &[&str]| output(command("", None, env, "pacman").args(args), Duration::from_secs(60));
+    let (listed, targets) = pacman(&["-Sp", "--needed", "--print-format", "%n", "nodejs", "npm"])?;
+    let installed = pacman(&["-Qq"])?.1;
+    let installed: HashSet<&str> = installed.lines().collect();
+    if !listed.success() || targets.lines().any(|n| installed.contains(n)) || !pacman(&["-Qu"])?.1.trim().is_empty() {
+        return Err(NODE_UPDATE.into());
+    }
+    Ok(())
+}
+
 // npm's first line of why a run failed. It prints the error's code, syscall, errno and path first, and ends
 // every failed run with where its log is, so its last line never says why (npm 12.2).
 fn npm_cause(l: &str) -> bool {
@@ -261,9 +288,9 @@ fn npm_cause(l: &str) -> bool {
     !["code", "syscall", "errno", "path"].contains(&field) && !said.starts_with("A complete log of this run")
 }
 
-// Runs one step to its end, its output a line at a time. Err: it failed, with npm's line of why, or its
-// last line.
-fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result<(), String> {
+// Runs one step to its end, its output a line at a time (`node`: none, the Node.js step's line stands). Err: it
+// failed, with npm's line of why, NODE_UPDATE for a package file the mirror no longer has, or its last line.
+fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)], node: bool) -> Result<(), String> {
     let mut cmd = command("", None, env, &argv[0]);
     cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // started under the state lock: a cancel comes either before it or finds it in `proc`
@@ -283,14 +310,18 @@ fn run_step(run: &Arc<Run>, argv: &[String], env: &[(String, String)]) -> Result
         // progress redrawn with \r: the last part is what shows
         let l = plain(l.rsplit('\r').next().unwrap_or("")).trim().to_string();
         if !l.is_empty() {
-            if npm_cause(&l) {
+            // pacman could not get a file its lists name: the mirror has moved on (as the Apps window reads it)
+            let gone = node && ["403", "404", "410"].iter().any(|c| l.contains(&format!("returned error: {c}")));
+            if npm_cause(&l) || gone {
                 let mut c = cause.lock().unwrap();
                 if c.is_empty() {
-                    *c = l.clone();
+                    *c = if gone { NODE_UPDATE.into() } else { l.clone() };
                 }
             }
             *last.lock().unwrap() = l.clone();
-            r.step(InstallStep::Running { line: l });
+            if !node {
+                r.step(InstallStep::Running { line: l });
+            }
         }
     };
     let orx = read_lines(out, feed(run.clone(), last.clone(), cause.clone()));
@@ -489,10 +520,28 @@ mod tests {
         let (_i, rx) = begin("pi", true, &env, &home).unwrap();
         let steps = rest(&rx);
         assert_eq!(steps.last(), Some(&InstallStep::Done { version: "1.2.3".into() }));
-        assert!(lines(&steps).contains(&"installing nodejs..."));
+        assert_eq!(lines(&steps), ["Getting Node.js for pi…", "reify: 100%", "added 1 package in 1s"], "pacman's lines are not shown");
         let out = home.parent().unwrap();
         assert_eq!(fs::read_to_string(out.join("pkexec.args")).unwrap().trim(), "pacman -S --needed --noconfirm nodejs npm");
         assert!(fs::read_to_string(out.join("npm.args")).unwrap().ends_with("@earendil-works/pi-coding-agent\n"));
+    }
+
+    // As the Apps window gets an app: no Node.js install that would upgrade what is installed, or while updates are
+    // waiting, or for files the mirror no longer has
+    #[test]
+    fn node_waits_for_the_system_update() {
+        let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let refused = [InstallStep::Running { line: "Getting Node.js for Codex…".into() }, InstallStep::Failed(NODE_UPDATE.into())];
+        for (pacman, mode) in [("waiting", "ok"), ("upgrade", "ok"), ("missing", "ok"), ("", "gone")] {
+            let (_d, home, bin) = sandbox(&format!("node-update-{pacman}{mode}"));
+            let mut env = env_for(&home, &bin, &["install"], mode);
+            env.push(("FAKE_PACMAN".into(), pacman.into()));
+            let (_i, rx) = begin("codex", true, &env, &home).unwrap();
+            assert_eq!(rest(&rx), refused, "{pacman} {mode}");
+            let asked = home.parent().unwrap().join("pkexec.args").exists();
+            assert_eq!(asked, mode == "gone", "{pacman} {mode}: the password is asked for only when pacman can go ahead");
+            assert!(!home.parent().unwrap().join("npm.args").exists());
+        }
     }
 
     #[test]
@@ -523,7 +572,12 @@ mod tests {
         let env = env_for(&home, &bin, &["install"], "root");
         let out = home.parent().unwrap().to_path_buf();
         let (i, rx) = begin("pi", true, &env, &home).unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), InstallStep::Running { line: "running as root".into() });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), InstallStep::Running { line: "Getting Node.js for pi…".into() });
+        // its args are noted once it has left its process group
+        let until = Instant::now() + Duration::from_secs(10);
+        while !out.join("pkexec.args").exists() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(20));
+        }
         let pid: u32 = fs::read_to_string(out.join("pkexec.pid")).unwrap().trim().parse().unwrap();
         let t = Instant::now();
         i.cancel();

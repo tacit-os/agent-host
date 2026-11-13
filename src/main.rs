@@ -97,6 +97,7 @@ struct Session {
     stops: HashMap<String, (Value, Option<String>)>, // task -> its stop record, and the task's state when it was first shown
     stopping: HashMap<String, String>, // stop_task request id -> task
     auth: Option<&'static str>, // its process said its sign-in is gone ("signedOut" | "expired")
+    limited: Option<(u64, String)>, // the plan's usage limit stopped it: when that resets (unix s, 0: not said), on which account
     state: &'static str, // "working" | "waiting" | "idle"
     used: bool,          // has a transcript, so a restart must --resume
     to_child: Option<Sender<String>>, // lines for the process's stdin: its writer thread has it
@@ -142,6 +143,7 @@ impl Session {
             stops: HashMap::new(),
             stopping: HashMap::new(),
             auth: None,
+            limited: None,
             state: "idle",
             used: false,
             to_child: None,
@@ -171,7 +173,21 @@ impl Session {
         if let Some(f) = &self.fork_from {
             s["from"] = json!(f);
         }
+        if let Some(at) = self.limit(now_ms()) {
+            s["limited"] = json!({"resetsAt": (at > 0).then_some(at)});
+        }
         s
+    }
+
+    // The usage limit that stopped it, while it holds: until its reset time, and on the account it was reached on.
+    fn limit(&self, now: u64) -> Option<u64> {
+        let (at, on) = self.limited.as_ref()?;
+        (*on == accounts::account_id(self.tool, self.account.as_deref()) && (*at == 0 || at * 1000 > now)).then_some(*at)
+    }
+
+    // Stopped by the usage limit `info` describes (Claude Code's rate_limit_info).
+    fn limit_by(&mut self, info: &Value) {
+        self.limited = Some((info["resetsAt"].as_u64().unwrap_or(0), accounts::account_id(self.tool, self.account.as_deref())));
     }
 }
 
@@ -323,6 +339,12 @@ fn spawn(shared: &Shared, h: &mut Host, id: &str) -> Result<(), String> {
         Some("claude") => {}
         Some(t) => return Err(format!("a {t} session has no process of its own")),
         None => return Err("no such session".into()),
+    }
+    // One process per conversation. Another that has it open (a terminal, or the one a previous host started, which
+    // finishes its turn after the host has gone) would write the same transcript beside this one. The host has no
+    // process of its own for the session here: start, wake and fork spawn only once it has exited.
+    if let Some(pid) = history::holder_outside(id, 0) {
+        return Err(format!("Another Claude Code process (pid {pid}) has this session open. Send again once it has closed."));
     }
     h.next_gen += 1;
     let gen = h.next_gen;
@@ -580,6 +602,15 @@ fn relay(h: &mut Host, id: &str, gen: u64, mut v: Value, mut native: Option<Valu
         "system" if v["subtype"] == "commands_changed" => {
             accounts::note_commands("claude", s.account.as_deref(), &s.cwd, v["commands"].clone());
         }
+        // the plan's usage limit, as Claude Code reports each change of it: refused, and not run on paid extra usage,
+        // every turn stops at once until it resets
+        "rate_limit_event" => {
+            let (i, was) = (&v["rate_limit_info"], s.limited.take());
+            if i["status"] == "rejected" && i["isUsingOverage"] != true {
+                s.limit_by(i);
+            }
+            changed = was != s.limited;
+        }
         "result" => {
             if s.pending.is_empty() {
                 s.state = "idle";
@@ -588,6 +619,8 @@ fn relay(h: &mut Host, id: &str, gen: u64, mut v: Value, mut native: Option<Valu
             if v["is_error"] == true {
                 auth = accounts::auth_failure(s.tool, v["result"].as_str().unwrap_or(""))
                     .or((v["authError"] == true).then_some("signedOut"));
+            } else {
+                s.limited = None; // a turn that ended well: the limit has lifted
             }
             // what the turn made beside its tool-named writes (a script's output, a download)
             if s.turn_at > 0 {
@@ -614,6 +647,12 @@ fn relay(h: &mut Host, id: &str, gen: u64, mut v: Value, mut native: Option<Valu
         }
         "assistant" | "user" if v["parent_tool_use_id"].is_string() => {}
         "assistant" | "user" => {
+            // the reply a turn stopped by the limit ends on says when it resets too (a process that started limited
+            // may never see the limit change)
+            if v["api_error"] == "usage_limit_reached" {
+                s.limit_by(&v["api_error_params"]["rate_limit_info"]);
+                changed = true;
+            }
             history::claude_item(&v, &mut s.live, &mut s.calls, true);
             items = true;
         }
@@ -738,6 +777,16 @@ fn released(h: &mut Host, id: &str, reason: &str, stderr: Vec<String>) {
         }
     }
     h.announce(id);
+}
+
+// A usage limit whose reset time has passed, or that its session's account no longer has, is let go and said.
+fn lift_limits(h: &mut Host) {
+    let now = now_ms();
+    let lifted: Vec<String> = h.sessions.values().filter(|s| s.limited.is_some() && s.limit(now).is_none()).map(|s| s.id.clone()).collect();
+    for id in lifted {
+        h.sessions.get_mut(&id).unwrap().limited = None;
+        h.announce(&id);
+    }
 }
 
 // A session closed while idle is started again (resumed) for anything that needs its process.
@@ -1699,6 +1748,7 @@ fn main() {
             close(&mut h, &id, "idle");
             h.announce(&id);
         }
+        lift_limits(&mut h);
         // a shared server with no session left on it goes too
         codex::reap(&mut h, idle);
         opencode::reap(&mut h, idle);
@@ -1810,5 +1860,80 @@ mod tests {
         assert_eq!(sent[0]["response"]["response"]["behavior"], "deny");
         assert_eq!(sent[0]["response"]["response"]["interrupt"], true);
         assert_eq!(sent[1]["request"]["subtype"], "interrupt");
+    }
+
+    // A session another process has open (here a stand-in with its ~/.claude/sessions record) is not started a second
+    // time, by a start or by a message to a session the host has closed. The account is one that does not exist, so
+    // that nothing past the check (the old code) can start a real claude: it fails on the account instead.
+    #[test]
+    fn a_session_another_process_holds_is_not_started_again() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d006";
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        hold(&home, id, other.id());
+        let shared: Shared = Arc::new(Mutex::new(Host::default()));
+        let mut h = shared.lock().unwrap();
+        let req = json!({"op": "start", "cwd": home.to_str().unwrap(), "resume": id, "account": "claude-none"});
+        let held = format!("Another Claude Code process (pid {}) has this session open. Send again once it has closed.", other.id());
+        assert_eq!(start(&shared, &mut h, &req, "claude").unwrap_err(), held);
+        assert!(h.sessions.is_empty(), "the refused start left a session in the list");
+        let mut s = Session::new(id, home.to_str().unwrap(), "claude");
+        (s.used, s.account) = (true, Some("claude-none".into()));
+        h.sessions.insert(id.into(), s);
+        assert_eq!(send_message(&shared, &mut h, id, "hi", &[], &[]).unwrap_err(), held);
+        let _ = other.kill();
+        let _ = other.wait();
+        // once it has gone the start goes on, here to the missing account
+        h.sessions.clear();
+        assert_eq!(start(&shared, &mut h, &req, "claude").unwrap_err(), "no such claude account: claude-none");
+    }
+
+    // Claude Code 2.1.322's rate_limit_event, and the reply a stopped turn ends on as this machine's transcripts have
+    // it: the session's state says limited, with the reset in unix seconds, until the limit lifts.
+    #[test]
+    fn a_usage_limit_is_in_the_sessions_state_until_it_lifts() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d004";
+        let mut h = Host::default();
+        h.sessions.insert(id.into(), Session::new(id, home.to_str().unwrap(), "claude"));
+        let at = now_ms() / 1000 + 3600;
+        let event = |status: &str, at: u64, overage: bool| json!({"type": "rate_limit_event", "uuid": "u", "session_id": id,
+            "rate_limit_info": {"status": status, "resetsAt": at, "rateLimitType": "five_hour", "overageStatus": "rejected",
+                                "overageDisabledReason": "out_of_credits", "isUsingOverage": overage}});
+        let limited = |h: &Host| h.sessions[id].summary().get("limited").cloned();
+        relay(&mut h, id, 0, event("rejected", at, false), None);
+        assert_eq!(limited(&h), Some(json!({"resetsAt": at})));
+        relay(&mut h, id, 0, json!({"type": "result", "subtype": "success", "is_error": true, "api_error": "usage_limit_reached"}), None);
+        assert_eq!(limited(&h), Some(json!({"resetsAt": at})), "the turn it stopped ended");
+        relay(&mut h, id, 0, event("allowed", at, false), None);
+        assert_eq!(limited(&h), None, "allowed again");
+        relay(&mut h, id, 0, json!({"type": "assistant", "parent_tool_use_id": null, "session_id": id, "error": "rate_limit",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "You've hit your session limit · resets 7:40am (Europe/Stockholm)"}]},
+            "api_error": "usage_limit_reached", "api_error_params": {"rate_limit_info": {"status": "rejected", "resetsAt": at, "isUsingOverage": false}}}), None);
+        assert_eq!(limited(&h), Some(json!({"resetsAt": at})), "the stopped reply with no event before it");
+        relay(&mut h, id, 0, json!({"type": "result", "subtype": "success", "is_error": false}), None);
+        assert_eq!(limited(&h), None, "a turn that ended well");
+        relay(&mut h, id, 0, event("rejected", at, true), None);
+        assert_eq!(limited(&h), None, "a turn on paid extra usage goes on");
+        relay(&mut h, id, 0, event("rejected", now_ms() / 1000 - 1, false), None);
+        assert_eq!(limited(&h), None, "its reset time has passed");
+        relay(&mut h, id, 0, event("rejected", at, false), None);
+        h.sessions.get_mut(id).unwrap().account = Some("claude-work".into());
+        assert_eq!(limited(&h), None, "another account");
+    }
+
+    #[test]
+    fn a_lifted_limit_is_let_go() {
+        let home = scratch_home();
+        let id = "4a0f1c2e-0000-4000-8000-00000000d005";
+        let mut h = Host::default();
+        let mut s = Session::new(id, home.to_str().unwrap(), "claude");
+        s.limited = Some((now_ms() / 1000 + 3600, "claude-personal".into()));
+        h.sessions.insert(id.into(), s);
+        lift_limits(&mut h);
+        assert!(h.sessions[id].limited.is_some(), "it holds");
+        h.sessions.get_mut(id).unwrap().limited.as_mut().unwrap().0 = now_ms() / 1000 - 1;
+        lift_limits(&mut h);
+        assert!(h.sessions[id].limited.is_none(), "its reset time has passed");
     }
 }
