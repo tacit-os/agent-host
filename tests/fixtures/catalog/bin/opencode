@@ -1,10 +1,10 @@
 #!/bin/sh
-# Stands in for opencode in catalog.rs's tests. FAKE_MODE=hang: `models` never ends;
-# FAKE_MODE=hangversion: `--version` never ends. A hung one notes its pid in $FAKE_OUT.
+# Stands in for opencode in catalog.rs's tests. FAKE_MODE=hang: `models` never ends, as a launcher whose child holds
+# its stdout; FAKE_MODE=hangversion: `--version` never ends. A hung one notes its pid in $FAKE_OUT.
 D=$(dirname "$0")/..
 case "$FAKE_MODE $*" in
 "hangversion --version") echo $$ > "$FAKE_OUT/opencode-version.pid"; exec sleep 30 ;;
-"hang models --verbose") echo $$ > "$FAKE_OUT/opencode.pid"; exec sleep 30 ;;
+"hang models --verbose") echo $$ > "$FAKE_OUT/opencode.pid"; sleep 30 & echo $! > "$FAKE_OUT/opencode-child.pid"; wait ;;
 esac
 case "$*" in
 --version) echo "0.0.1" ;;

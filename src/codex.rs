@@ -223,6 +223,23 @@ fn sandbox_policy(srv: &Server, kind: &str, cwd: &str) -> Value {
     p
 }
 
+// The model and effort a new thread in `cwd` gets: the person's config, else Codex's default model and its level.
+fn defaults(srv: &Server, cwd: &str) -> (Option<String>, Option<String>) {
+    let c = srv.call("config/read", json!({"cwd": cwd})).map(|r| r["config"].clone()).unwrap_or_default();
+    let text = |v: &Value| v.as_str().map(str::to_string);
+    let (mut model, mut effort) = (text(&c["model"]), text(&c["model_reasoning_effort"]));
+    if model.is_none() || effort.is_none() {
+        let list = srv.call("model/list", json!({})).map(|r| r["data"].clone()).unwrap_or_default();
+        let m = list.as_array().into_iter().flatten()
+            .find(|m| model.as_deref().map_or(m["isDefault"] == true, |id| m["model"] == id || m["id"] == id));
+        if let Some(m) = m {
+            model = model.or(text(&m["model"]));
+            effort = effort.or(text(&m["defaultReasoningEffort"]));
+        }
+    }
+    (model, effort)
+}
+
 fn with(mut a: Value, b: Value) -> Value {
     for (k, v) in b.as_object().into_iter().flatten() {
         a[k] = v.clone();
@@ -320,7 +337,7 @@ pub fn send(shared: &Shared, req: &Value) -> Result<Value, String> {
 fn turn(shared: &Shared, srv: &Server, id: &str, text: &str, images: &[String], files: &[String]) -> Result<(), String> {
     let mut input = vec![json!({"type": "text", "text": crate::with_mentions(text, files)})];
     input.extend(images.iter().map(|p| json!({"type": "localImage", "path": p})));
-    let (running, mut params, change, cwd) = {
+    let (running, mut params, change, cwd, reset) = {
         let mut h = shared.lock().unwrap();
         let s = h.sessions.get(id).ok_or("no such session")?;
         let running = s.turn.clone();
@@ -332,13 +349,27 @@ fn turn(shared: &Shared, srv: &Server, id: &str, text: &str, images: &[String], 
         if let Some(e) = &s.effort_req {
             p["effort"] = json!(e);
         }
+        let reset = s.to_default.clone();
         // marked working before the turn starts: a turn that ends at once must find it so
         sent(&mut h, id, text);
         h.announce(id);
-        (running, p, change, cwd)
+        (running, p, change, cwd, reset)
     };
     let mut sandbox = None;
+    let mut missed = Vec::new(); // defaults that could not be read, tried again with the next turn
     let r = if running.is_empty() {
+        // "default" picked after another model or level: a turn's stay with the thread for the turns after it, so the
+        // ones a new thread would get are sent; one named since (a resume may) is sent as it is
+        let reset: Vec<&str> = reset.into_iter().filter(|f| params.get(*f).is_none()).collect();
+        if !reset.is_empty() {
+            let (model, effort) = defaults(srv, &cwd);
+            for field in reset {
+                match if field == "model" { &model } else { &effort } {
+                    Some(v) => params[field] = json!(v),
+                    None => missed.push(field),
+                }
+            }
+        }
         if let Some(kind) = change {
             let p = sandbox_policy(srv, kind, &cwd);
             params["sandboxPolicy"] = p.clone();
@@ -359,6 +390,9 @@ fn turn(shared: &Shared, srv: &Server, id: &str, text: &str, images: &[String], 
             }
             if let (Some(s), Some(p)) = (h.sessions.get_mut(id), sandbox) {
                 s.native.insert("sandbox".into(), p);
+            }
+            if let Some(s) = h.sessions.get_mut(id).filter(|_| running.is_empty()) {
+                s.to_default = missed;
             }
             Ok(())
         }
@@ -485,8 +519,8 @@ fn shell_text(cmd: &str) -> String {
 // A unified diff as the text it replaces and the text it puts there.
 pub(crate) fn split_diff(diff: &str) -> (String, String) {
     let (mut old, mut new) = (String::new(), String::new());
-    for l in diff.lines() {
-        if l.starts_with("---") || l.starts_with("+++") || l.starts_with("@@") {
+    for l in body(diff) {
+        if l.starts_with("@@") {
             continue;
         }
         match l.as_bytes().first() {
@@ -500,6 +534,16 @@ pub(crate) fn split_diff(diff: &str) -> (String, String) {
         }
     }
     (old, new)
+}
+
+// A diff's lines without its file headers, the ---/+++ lines before its first hunk: inside a hunk, such a line is a
+// removed line that starts with "--" or an added one that starts with "++".
+fn body(diff: &str) -> impl Iterator<Item = &str> {
+    let mut hunk = false;
+    diff.lines().filter(move |l| {
+        hunk |= l.starts_with("@@");
+        hunk || !(l.starts_with("---") || l.starts_with("+++"))
+    })
 }
 
 // A fileChange item as Claude Code's Write (a new file) or Edit.
@@ -534,7 +578,7 @@ fn patch_of(item: &Value) -> String {
             "delete" => patch += &format!("*** Delete File: {path}\n"),
             _ => {
                 patch += &format!("*** Update File: {path}\n");
-                patch += &diff.lines().filter(|l| !l.starts_with("+++") && !l.starts_with("---")).map(|l| format!("{l}\n")).collect::<String>();
+                patch += &body(diff).map(|l| format!("{l}\n")).collect::<String>();
             }
         }
     }
@@ -806,5 +850,66 @@ mod tests {
         assert!(send("plan").get("sandboxPolicy").is_none());
         assert_eq!(send("acceptEdits")["sandboxPolicy"], configured, "back to edits without the config's network and folders");
         assert!(send("auto").get("sandboxPolicy").is_none(), "auto runs in the same kind");
+    }
+
+    // A removed line that starts with "--" (an SQL or Lua comment, a YAML or Markdown rule) is "---..." in the diff, and
+    // an added one that starts with "++" is "+++...": only the file headers before the first hunk are dropped.
+    #[test]
+    fn dashed_lines_inside_a_hunk_are_kept() {
+        let diff = "--- a/q.sql\n+++ b/q.sql\n@@ -1,3 +1,3 @@\n--- TODO: remove\n select 1;\n+++ x\n-old\n+new\n";
+        let (old, new) = split_diff(diff);
+        assert_eq!(old, "-- TODO: remove\nselect 1;\nold\n");
+        assert_eq!(new, "select 1;\n++ x\nnew\n");
+        let item = json!({"changes": [{"path": "/w/q.sql", "kind": {"type": "update"}, "diff": diff}]});
+        assert_eq!(patch_of(&item), "*** Update File: /w/q.sql\n@@ -1,3 +1,3 @@\n--- TODO: remove\n select 1;\n+++ x\n-old\n+new\n");
+        // a diff with no headers, as opencode's are cut
+        assert_eq!(split_diff("@@ -1 +0,0 @@\n----\n").0, "---\n");
+    }
+
+    // Choosing the default model or level after another one sends the one a new thread gets: turn/start's model and
+    // effort stay with the thread for the turns after it, so sending none kept the earlier choice.
+    #[test]
+    fn choosing_the_default_model_again_is_sent_to_codex() {
+        let id = "019a0000-0000-7000-8000-00000000c003";
+        let shared = host();
+        let (srv, written) = fake_server("default-test");
+        let (codex, (starts, started)) = (srv.clone(), channel());
+        thread::spawn(move || {
+            for l in written {
+                let v: Value = serde_json::from_str(&l).unwrap();
+                // Codex 0.159 with no model in config.toml (tried in a scratch CODEX_HOME)
+                let answer = match v["method"].as_str().unwrap_or("") {
+                    "config/read" => json!({"config": {"model": null, "model_reasoning_effort": null}}),
+                    "model/list" => json!({"data": [{"id": "gpt-6-astra", "model": "gpt-6-astra", "isDefault": true, "defaultReasoningEffort": "low"},
+                                                    {"id": "gpt-6-sol", "model": "gpt-6-sol", "isDefault": false, "defaultReasoningEffort": "medium"}]}),
+                    "turn/start" => {
+                        let _ = starts.send(v["params"].clone());
+                        json!({"turn": {"id": "turn-1"}})
+                    }
+                    _ => json!({}),
+                };
+                if let Some(tx) = v["id"].as_u64().and_then(|n| codex.waiting.lock().unwrap().remove(&n)) {
+                    let _ = tx.send(Ok(answer));
+                }
+            }
+        });
+        let reply = json!({"thread": {"id": id}, "model": "gpt-6-astra", "sandbox": {"type": "workspaceWrite"}});
+        opened(&shared, &srv, &reply, "/srv/w", &json!({"mode": "acceptEdits"}), None).unwrap();
+        let send = |model: &str, effort: &str| {
+            {
+                let mut h = shared.lock().unwrap();
+                // "": nothing chosen before this turn
+                for (op, v) in [("model", model), ("effort", effort)].into_iter().filter(|(_, v)| !v.is_empty()) {
+                    crate::handle(&shared, &mut h, 0, &json!({"op": op, "id": id, op: v}), None).unwrap();
+                }
+                h.sessions.get_mut(id).unwrap().turn.clear(); // the last turn has ended
+            }
+            turn(&shared, &srv, id, "go on", &[], &[]).unwrap();
+            let p = started.recv_timeout(Duration::from_secs(5)).unwrap();
+            (p["model"].clone(), p["effort"].clone())
+        };
+        assert_eq!(send("gpt-6-sol", "high"), (json!("gpt-6-sol"), json!("high")));
+        assert_eq!(send("default", "default"), (json!("gpt-6-astra"), json!("low")), "the earlier model and level stay");
+        assert_eq!(send("", ""), (Value::Null, Value::Null), "the default is sent once");
     }
 }

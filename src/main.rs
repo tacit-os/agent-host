@@ -82,6 +82,7 @@ struct Session {
     model_req: Option<String>, // passed on every (re)start
     effort_req: Option<String>,
     mode_req: Option<String>,
+    to_default: Vec<&'static str>, // codex: "model", "effort" chosen as the default, sent as such with its next turn
     fork_from: Option<String>, // Claude: the session this one forks, until its first message is sent
     turn_at: u64,              // when the running turn was sent (ms): what it made is swept at its result
     turn: String,              // codex: the running turn's id
@@ -126,6 +127,7 @@ impl Session {
             model_req: None,
             effort_req: None,
             mode_req: None,
+            to_default: Vec::new(),
             fork_from: None,
             turn_at: 0,
             turn: String::new(),
@@ -1031,6 +1033,10 @@ fn handle(shared: &Shared, h: &mut Host, cid: u64, req: &Value, tool: Option<&'s
             let alive = s.to_child.is_some();
             let was = std::mem::replace(&mut s.effort, value.clone().unwrap_or_default());
             s.effort_req = value.clone();
+            s.to_default.retain(|f| *f != "effort");
+            if tool == "codex" && value.is_none() {
+                s.to_default.push("effort");
+            }
             if tool == "claude" && alive {
                 let rid = h.control(&id, json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": value}}))?;
                 h.sessions.get_mut(&id).unwrap().ctl.insert(rid, ("effort", was));
@@ -1053,8 +1059,13 @@ fn handle(shared: &Shared, h: &mut Host, cid: u64, req: &Value, tool: Option<&'s
             } else {
                 s.model_req = (!default).then(|| value.clone());
                 s.model = value.clone();
+                s.to_default.retain(|f| *f != "model");
+                if tool == "codex" && default {
+                    s.to_default.push("model");
+                }
             }
-            // Codex takes both with its next turn, opencode a model; an opencode mode changes its rules now
+            // Codex takes both with its next turn (a default as the one a new thread gets: codex::defaults), opencode a
+            // model; an opencode mode changes its rules now
             if tool == "pi" && alive && !default {
                 pi::set(h, &id, op, &value)?;
             } else if tool == "opencode" && alive && op == "mode" {

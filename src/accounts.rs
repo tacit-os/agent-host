@@ -812,11 +812,12 @@ pub fn op(cid: u64, req: &Value) -> Result<Value, String> {
                         c.accounts = true;
                     }
                 }
-                // the host starts with the session, before the lock's password opens the keyring: read it again,
-                // and once it has opened, check again what was read without its keys
+                // the host starts with the session, before the lock's password opens the keyring (or before the
+                // Secret Service is up, read as absent): read it again, and once it has opened, check again what was
+                // read without its keys
                 let was = st().keyring;
                 refresh_keyring();
-                if was == "locked" && st().keyring == "open" {
+                if was != "open" && st().keyring == "open" {
                     thread::spawn(check_all);
                 }
             }
@@ -944,7 +945,8 @@ pub fn op(cid: u64, req: &Value) -> Result<Value, String> {
             if !used.is_empty() && req["force"] != true {
                 return Ok(json!({"ev": "error", "message": "This key is used by an account.", "usedBy": used}));
             }
-            key_entry(&st().file, id).ok_or("no such key")?;
+            let agents: Vec<String> = key_entry(&st().file, id).ok_or("no such key")?["use"].as_array().into_iter().flatten()
+                .filter_map(|a| a.as_str().map(String::from)).collect();
             keys::clear(id)?;
             {
                 let mut st_ = st();
@@ -955,6 +957,10 @@ pub fn op(cid: u64, req: &Value) -> Result<Value, String> {
             }
             refresh_keyring();
             push_state();
+            // pi and opencode list a provider by its key
+            for agent in agents {
+                thread::spawn(move || check(&personal_id(&agent)));
+            }
             Ok(ok)
         }
         "install" => install_op(s("agent")?, req["node"] == true).map(|_| ok),
@@ -1074,6 +1080,54 @@ fn make_home(agent: &str, id: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(dir)
+}
+
+// An account folder made before Personal had one of the shared files, or (before 0.1.3) before Personal had its history
+// folder: what Personal has now is linked, and a history folder of the account's own is moved into Personal's and
+// linked, so its conversations show in Praxis. Anything of the account's own by that name is kept.
+fn relink(agent: &str, own: &Path, dir: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    for name in shared_names(agent) {
+        let (target, link) = (own.join(name), dir.join(name));
+        let history = matches!(*name, "projects" | "sessions");
+        if history {
+            let _ = fs::DirBuilder::new().recursive(true).mode(0o700).create(&target);
+        }
+        let Ok(t) = fs::metadata(&target) else { continue };
+        match fs::symlink_metadata(&link) {
+            Err(_) => {}
+            // moved only when all of it can go, on one disk: an account left with part of its history could not
+            // resume what was moved
+            Ok(m) if history && m.is_dir() && m.dev() == t.dev() => {
+                if !move_into(&link, &target, true) {
+                    eprintln!("[accounts] {}: kept, Personal's {name} already has some of its files", link.display());
+                    continue;
+                }
+                if !move_into(&link, &target, false) || fs::remove_dir(&link).is_err() {
+                    eprintln!("[accounts] {}: could not be moved into Personal's", link.display());
+                    continue;
+                }
+            }
+            Ok(_) => continue,
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&target, &link) {
+            eprintln!("[accounts] {}: {e}", link.display());
+        }
+    }
+}
+
+// Moves what `from` holds into `to`, merging folders, and says whether all of it went; with `dry`, only whether it
+// would (no file of the same name is in the way).
+fn move_into(from: &Path, to: &Path, dry: bool) -> bool {
+    let Ok(list) = fs::read_dir(from) else { return false };
+    list.flatten().all(|e| {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        match fs::symlink_metadata(&dst) {
+            Err(_) => dry || fs::rename(&src, &dst).is_ok(),
+            Ok(m) if m.is_dir() && e.file_type().is_ok_and(|t| t.is_dir()) => move_into(&src, &dst, dry) && (dry || fs::remove_dir(&src).is_ok()),
+            Ok(_) => false,
+        }
+    })
 }
 
 fn account_add(req: &Value) -> Result<Value, String> {
@@ -1495,6 +1549,13 @@ pub fn note_claude_init(account: Option<&str>, cwd: &str, init: Value) {
 pub fn start(shared: crate::Shared) {
     let _ = SHARED.set(shared.clone());
     refresh_keyring();
+    // before any session or client
+    let accounts = all(&st().file);
+    for a in accounts.iter().filter(|a| !a.personal) {
+        if let Some(dir) = a.home.as_deref().filter(|d| d.starts_with(accounts_root())) {
+            relink(&a.agent, &personal_dir(&a.agent), dir);
+        }
+    }
     thread::spawn(move || {
         refresh_agents();
         check_all();
@@ -1659,6 +1720,45 @@ mod tests {
         let cmd = cmd.unwrap();
         let home = cmd.get_envs().find(|(k, _)| *k == "CLAUDE_CONFIG_DIR").and_then(|(_, v)| v.map(PathBuf::from));
         assert_eq!(home, Some(dir), "reports are read on Personal");
+    }
+
+    // An account folder made before Personal had a shared file, or its history folder (0.1.0 to 0.1.2), is linked to
+    // what Personal has now at start, and its own history moves into Personal's, where Praxis reads it.
+    #[test]
+    fn an_older_account_folder_is_linked_to_what_personal_has_now() {
+        let root = std::env::temp_dir().join(format!("agent-host-relink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (own, work, other) = (root.join("personal"), root.join("work"), root.join("other"));
+        let file = |p: PathBuf, text: &str| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        };
+        file(own.join("settings.json"), "{}");
+        file(own.join("CLAUDE.md"), "Personal's");
+        file(own.join("projects/-srv-a/1.jsonl"), "");
+        file(work.join("CLAUDE.md"), "Work's own");
+        file(work.join("projects/-srv-a/2.jsonl"), "w2");
+        file(work.join("projects/-srv-b/3.jsonl"), "w3");
+        file(other.join("projects/-srv-a/1.jsonl"), "another 1");
+        relink("claude", &own, &work);
+        relink("claude", &own, &other);
+        assert_eq!(fs::read_link(work.join("settings.json")).unwrap(), own.join("settings.json"));
+        assert_eq!(fs::read_to_string(work.join("CLAUDE.md")).unwrap(), "Work's own");
+        assert!(!work.join("skills").exists(), "linked to what Personal does not have");
+        assert_eq!(fs::read_link(work.join("projects")).unwrap(), own.join("projects"));
+        assert_eq!(fs::read_to_string(own.join("projects/-srv-a/2.jsonl")).unwrap(), "w2");
+        assert_eq!(fs::read_to_string(own.join("projects/-srv-b/3.jsonl")).unwrap(), "w3");
+        assert_eq!(fs::read_to_string(own.join("projects/-srv-a/1.jsonl")).unwrap(), "");
+        // a file Personal has too: none of that history is moved
+        assert!(!other.join("projects").is_symlink());
+        assert_eq!(fs::read_to_string(other.join("projects/-srv-a/1.jsonl")).unwrap(), "another 1");
+        // a Codex account whose Personal has no sessions yet
+        let (own, work) = (root.join("personal-codex"), root.join("work-codex"));
+        file(work.join("sessions/2026/10/09/rollout-x.jsonl"), "x");
+        relink("codex", &own, &work);
+        assert_eq!(fs::read_link(work.join("sessions")).unwrap(), own.join("sessions"));
+        assert!(own.join("sessions/2026/10/09/rollout-x.jsonl").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

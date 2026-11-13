@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
@@ -84,7 +85,11 @@ fn home_str() -> String {
 
 fn cached_in(root: &Path, ctx: &Ctx) -> Option<Value> {
     let f = read_json(&models_file(root, &ctx.account)).filter(|f| f["agent"] == ctx.agent.as_str())?;
-    let unread = matches!(ctx.agent.as_str(), "claude" | "pi") && !commands_file(root, &ctx.account, &ctx.folder()).exists();
+    // the folder's commands not read yet; a folder that is gone, or whose last read failed, is not read again on every
+    // request, only with the next refresh
+    let folder = ctx.folder();
+    let unread = matches!(ctx.agent.as_str(), "claude" | "pi") && !commands_file(root, &ctx.account, &folder).exists()
+        && f["commandsFailed"].as_str() != Some(folder.as_str()) && Path::new(&folder).is_dir();
     let stale = crate::now_ms().saturating_sub(f["refreshed"].as_u64().unwrap_or(0)) > DAY_MS
         || version_seen(ctx).is_some_and(|v| f["version"].as_str() != Some(v.as_str()))
         || unread;
@@ -118,7 +123,14 @@ fn refresh_in(root: &Path, ctx: &Ctx, wait: Duration) -> Result<Value, String> {
                 },
                 None => json!([]),
             };
-            f["claude"] = json!({"init": trim_init(&init["models"]), "extra": claude_extra(&claude_json(ctx)),
+            // an initialize with no models (Claude Code lists them even signed out and offline) keeps the last list and
+            // its time; with no list before it, the next request asks again
+            let listed = init["models"].as_array().is_some_and(|a| !a.is_empty());
+            if !listed {
+                f["refreshed"] = json!(old["refreshed"].as_u64().unwrap_or(0));
+            }
+            let models = trim_init(if listed { &init["models"] } else { &was["init"] });
+            f["claude"] = json!({"init": models, "extra": claude_extra(&claude_json(ctx)),
                                  "used": used, "usedAt": used_at, "api": api});
             f["models"] = json!(compose_claude(&f["claude"]));
         }
@@ -140,7 +152,10 @@ fn refresh_in(root: &Path, ctx: &Ctx, wait: Duration) -> Result<Value, String> {
             f["models"] = json!(pi_models(&table, default, &provider_names()));
             match pi_get_commands(ctx, &cwd, wait) {
                 Ok(raw) => write_commands(root, &ctx.account, &cwd, pi_commands(&raw)),
-                Err(e) => eprintln!("[catalog] pi's commands: {e}"),
+                Err(e) => {
+                    eprintln!("[catalog] pi's commands: {e}");
+                    f["commandsFailed"] = json!(cwd);
+                }
             }
         }
         "opencode" => {
@@ -264,7 +279,7 @@ fn command(ctx: &Ctx, program: &str) -> Command {
 fn output(cmd: &mut Command, wait: Duration) -> Result<String, String> {
     let name = cmd.get_program().to_string_lossy().into_owned();
     let deadline = Instant::now() + wait;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0)
         .spawn().map_err(|e| format!("{name}: {e}"))?;
     let mut out = child.stdout.take().ok_or_else(|| format!("{name}: no stdout"))?;
     let (tx, rx) = channel();
@@ -343,7 +358,8 @@ fn ask(child: &mut Child, line: &Value, deadline: Instant, answer: impl Fn(&Valu
     rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
 }
 
-// Waits for the child to end until `deadline`, then kills it (its own pid only): None.
+// Waits for the child to end until `deadline`, then kills it with its process group (codex, pi and opencode are
+// launchers whose program would go on holding the pipe): None.
 fn reap(mut child: Child, deadline: Instant) -> Option<ExitStatus> {
     while Instant::now() < deadline {
         if let Ok(Some(s)) = child.try_wait() {
@@ -351,7 +367,8 @@ fn reap(mut child: Child, deadline: Instant) -> Option<ExitStatus> {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
+    let _ = Command::new("kill").args(["-s", "KILL", "--", &format!("-{}", child.id())])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     let _ = child.wait();
     None
 }
@@ -364,7 +381,7 @@ fn claude_probe(ctx: &Ctx, cwd: &str, wait: Duration) -> Result<Value, String> {
         .args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
                "--no-session-persistence", "--settings", r#"{"disableAllHooks":true}"#])
         .current_dir(cwd)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0)
         .spawn().map_err(|e| format!("start claude: {e}"))?;
     let req = json!({"type": "control_request", "request_id": "catalog-init", "request": {"subtype": "initialize"}});
     let reply = ask(&mut child, &req, deadline,
@@ -383,7 +400,7 @@ fn pi_get_commands(ctx: &Ctx, cwd: &str, wait: Duration) -> Result<Value, String
     let mut child = command(ctx, "pi")
         .args(["--mode", "rpc", "--offline", "--no-session", "--no-extensions"])
         .current_dir(cwd)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0)
         .spawn().map_err(|e| format!("start pi: {e}"))?;
     let reply = ask(&mut child, &json!({"id": "catalog", "type": "get_commands"}), deadline,
                     |v| v["type"] == "response" && v["id"] == "catalog");
@@ -986,6 +1003,24 @@ mod tests {
         }
     }
 
+    // An initialize that lists no models keeps the last list, or with none is asked again next time, instead of a
+    // near empty picker for a day
+    #[test]
+    fn a_claude_probe_with_no_models_keeps_the_last_list() {
+        let (root, out, cwd, home) = (scratch("cn"), scratch("cn-out"), scratch("cn-cwd"), scratch("cn-home"));
+        let none = fake("claude", Some(home.clone()), &cwd, &out, "nomodels");
+        refresh_in(&root, &none, WAIT).unwrap();
+        assert_eq!(cached_in(&root, &none).unwrap()["stale"], true, "an empty answer counted as a refresh");
+        let ctx = fake("claude", Some(home.clone()), &cwd, &out, "");
+        let listed = refresh_in(&root, &ctx, WAIT).unwrap()["models"].as_array().unwrap().len();
+        let c = refresh_in(&root, &none, WAIT).unwrap();
+        assert_eq!(c["models"].as_array().unwrap().len(), listed, "the list was lost");
+        assert_eq!(cached_in(&root, &none).unwrap()["stale"], false);
+        for d in [root, out, cwd, home] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
     #[test]
     fn claude_refresh() {
         let (root, out, cwd, home) = (scratch("cr"), scratch("cr-out"), scratch("cr-cwd"), scratch("cr-home"));
@@ -1075,6 +1110,28 @@ mod tests {
         }
     }
 
+    // A folder whose commands cannot be read is not stale for that: every catalog request then ran a refresh again
+    #[test]
+    fn commands_that_cannot_be_read_are_not_read_on_every_request() {
+        let (root, out, cwd, pi_home) = (scratch("nc"), scratch("nc-out"), scratch("nc-cwd"), scratch("nc-pi"));
+        let pi = fake("pi", Some(pi_home.clone()), &cwd, &out, "nocommands");
+        let c = refresh_in(&root, &pi, WAIT).unwrap();
+        assert_eq!(c["models"].as_array().unwrap().len(), 414);
+        assert_eq!(cached_in(&root, &pi).unwrap()["stale"], false, "pi's failed get_commands");
+        // another folder is still read
+        let elsewhere = fake("pi", Some(pi_home.clone()), &out, &out, "nocommands");
+        assert_eq!(cached_in(&root, &elsewhere).unwrap()["stale"], true);
+        // Claude in a folder that is gone, where its probe cannot start
+        let claude = fake("claude", None, &cwd, &out, "");
+        refresh_in(&root, &claude, WAIT).unwrap();
+        let gone = fake("claude", None, &cwd.join("gone"), &out, "");
+        assert!(refresh_in(&root, &gone, WAIT).is_err());
+        assert_eq!(cached_in(&root, &gone).unwrap()["stale"], false, "a folder that is gone");
+        for d in [root, out, cwd, pi_home] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
     #[test]
     fn hung_commands_are_killed() {
         let (root, out, cwd, own) = (scratch("hang"), scratch("hang-out"), scratch("hang-cwd"), scratch("hang-path"));
@@ -1086,6 +1143,11 @@ mod tests {
         assert!(e.contains("did not finish"), "{e}");
         assert!(t.elapsed() < Duration::from_secs(4));
         assert!(!alive(&out.join("opencode.pid")), "killed at the deadline");
+        let child = out.join("opencode-child.pid");
+        while alive(&child) && t.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(&child), "its child is left running");
         // cached() does not wait for --version; the read on its thread is killed at 5 s
         write_json(&models_file(&root, &ctx.account), &json!({"agent": "opencode", "version": "0.0.1", "refreshed": crate::now_ms(), "models": []}));
         versions().lock().unwrap().remove(&version_key(&ctx));

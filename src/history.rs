@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Entry {
     id: String,
@@ -40,8 +40,12 @@ pub struct Entry {
     seen: Vec<String>, // the files it changed, the most recently changed last
     add: u64,
     del: u64,
-    place: Option<Place>, // worked out by placed() when id or cwd change
+    open: Vec<Value>, // edits read before their result: counted once it is read, unless it says they failed
+    place: Option<Place>, // worked out by placed() when id or cwd change, and again after PLACE_AGE
 }
+
+// A folder removed, or made a repository, since its row was placed shows within this.
+const PLACE_AGE: Duration = Duration::from_secs(60);
 
 // What a row shows about where a session ran, for the id and cwd it was worked out for.
 struct Place {
@@ -51,6 +55,7 @@ struct Place {
     local: bool,
     root: String,
     resume: String,
+    at: Instant,
 }
 
 impl Entry {
@@ -62,18 +67,19 @@ impl Entry {
         };
         Entry { id, tool, path: path.into(), cwd: String::new(), title: String::new(), custom: false,
                 prompt: String::new(), last_prompt: String::new(), started: 0, updated: 0, bytes: 0, offset: 0,
-                entry: String::new(), parent: String::new(), reply: String::new(), seen: Vec::new(), add: 0, del: 0, place: None }
+                entry: String::new(), parent: String::new(), reply: String::new(), seen: Vec::new(), add: 0, del: 0, open: Vec::new(),
+                place: None }
     }
 
     fn placed(&mut self) {
-        if self.place.as_ref().is_some_and(|p| p.id == self.id && p.cwd == self.cwd) {
+        if self.place.as_ref().is_some_and(|p| p.id == self.id && p.cwd == self.cwd && p.at.elapsed() < PLACE_AGE) {
             return;
         }
         let shown = local_cwd(&self.cwd);
         let local = !shown.is_empty() && Path::new(&shown).is_dir();
         let root = if local { repo_root(&shown) } else { String::new() };
         let resume = resume_command(self.tool, &self.id, if local { &shown } else { "" });
-        self.place = Some(Place { id: self.id.clone(), cwd: self.cwd.clone(), shown, local, root, resume });
+        self.place = Some(Place { id: self.id.clone(), cwd: self.cwd.clone(), shown, local, root, resume, at: Instant::now() });
     }
 
     // A protocol 4 row; `full` (protocol 5) adds files, lastReply, resume, repo, root and local.
@@ -124,20 +130,17 @@ fn resume_command(tool: &str, id: &str, cwd: &str) -> String {
 // The nearest folder at or above `cwd` that holds a git repository, or "". An empty `.git` folder
 // (agents leave them in /tmp and $HOME) is not one: a repository has a HEAD, a worktree a `.git` file.
 fn repo_root(cwd: &str) -> String {
-    static ROOTS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = ROOTS.get_or_init(Default::default);
-    if let Some(r) = cache.lock().unwrap().get(cwd) {
-        return r.clone();
-    }
-    let root = Path::new(cwd).ancestors().find(|p| { let g = p.join(".git"); g.is_file() || g.join("HEAD").exists() }).map_or(String::new(), |p| p.to_string_lossy().into_owned());
-    cache.lock().unwrap().insert(cwd.to_string(), root.clone());
-    root
+    Path::new(cwd).ancestors().find(|p| { let g = p.join(".git"); g.is_file() || g.join("HEAD").exists() }).map_or(String::new(), |p| p.to_string_lossy().into_owned())
 }
 
 // The words and edits a scan keeps from items, in the order the conversation had them. `prompts`:
 // also what you asked (Claude Code and Codex rollouts have lines of their own for that).
 fn absorb(e: &mut Entry, items: &[Value], prompts: bool) {
     for it in items {
+        // a refused or failed edit changed nothing, as changes() counts
+        if it["error"] == true {
+            continue;
+        }
         for f in it["files"].as_array().into_iter().flatten() {
             let p = f["path"].as_str().unwrap_or("").to_string();
             e.seen.retain(|x| *x != p);
@@ -183,6 +186,29 @@ fn forget(e: &mut Entry) {
     e.seen.clear();
     e.add = 0;
     e.del = 0;
+    e.open.clear();
+}
+
+// absorb() for a scan that reads on from where it stopped: an edit whose result is not in these items waits in
+// `open` for settle(), as the result is a line of its own that may come in a later scan.
+fn absorb_edits(e: &mut Entry, items: Vec<Value>) {
+    for it in items {
+        if it["files"].is_array() && it.get("result").is_none() {
+            e.open.push(json!({"id": it["id"], "files": it["files"]}));
+        } else {
+            absorb(e, &[it], false);
+        }
+    }
+}
+
+// The result of edit `id`, read: it counts unless it failed.
+fn settle(e: &mut Entry, id: &str, failed: bool) {
+    if let Some(i) = e.open.iter().position(|o| o["id"] == id) {
+        let it = e.open.remove(i);
+        if !failed {
+            absorb(e, &[it], false);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -200,7 +226,9 @@ fn index_file() -> PathBuf {
 }
 // An index written with fewer fields than this host keeps is read again from the start.
 // 3: the words for search are kept beside it (said_of); a version 2 index is read again so they are written
-const INDEX_VERSION: u64 = 3;
+// 4: Codex edits of lines that start "--" or "++" counted (23aebbe, shipped in 0.1.7 without a new version), refused
+// and failed edits left out and kept open until their result (open), a first prompt found past injected context
+const INDEX_VERSION: u64 = 4;
 
 // ~/.cache/agent-host, or AGENT_HOST_CACHE (tests)
 pub(crate) fn cache_dir() -> PathBuf {
@@ -211,7 +239,7 @@ impl Entry {
         json!({"id": self.id, "tool": self.tool, "path": self.path, "cwd": self.cwd, "title": self.title, "custom": self.custom,
                "prompt": self.prompt, "lastPrompt": self.last_prompt, "started": self.started, "updated": self.updated,
                "bytes": self.bytes, "offset": self.offset, "entry": self.entry, "parent": self.parent,
-               "reply": self.reply, "seen": self.seen, "add": self.add, "del": self.del})
+               "reply": self.reply, "seen": self.seen, "add": self.add, "del": self.del, "open": self.open})
     }
     fn restored(v: &Value) -> Option<Self> {
         let tool = match v["tool"].as_str()? { "claude" => "claude", "codex" => "codex", "pi" => "pi", "opencode" => "opencode", _ => return None };
@@ -222,7 +250,7 @@ impl Entry {
                      started: num("started"), updated: num("updated"), bytes: num("bytes"), offset: num("offset"),
                      entry: text("entry"), parent: text("parent"), reply: text("reply"),
                      seen: v["seen"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect(),
-                     add: num("add"), del: num("del"), place: None })
+                     add: num("add"), del: num("del"), open: v["open"].as_array().cloned().unwrap_or_default(), place: None })
     }
 }
 
@@ -459,7 +487,7 @@ fn scan(e: &mut Entry) {
             // on the branch that ends the conversation, as changes() counts them
             if rewound {
                 forget(e);
-                absorb(e, &transcript_from(&path, "claude", 0, false).0, false);
+                absorb_edits(e, transcript_from(&path, "claude", 0, false).0);
                 // the words of the turns it went back over go too
                 let mut all = String::new();
                 lines(&path, 0, |line| said_of(line, "claude", false, &mut all));
@@ -520,7 +548,10 @@ fn claude_meta(e: &mut Entry, line: &[u8], words: &mut Vec<u8>) {
             e.started = parse_ts(v["timestamp"].as_str().unwrap_or(""));
         }
         if e.prompt.is_empty() && v["type"] == "user" && v["isMeta"] != true && v["isSidechain"] != true {
-            if let Some(Said::Text(t)) = first_text(&v["message"]["content"]).map(|t| said(&t)) {
+            // the first block that is something typed: an IDE's open file or a system reminder may come before it
+            let c = &v["message"]["content"];
+            let blocks = c.as_str().into_iter().chain(c.as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()));
+            if let Some(t) = blocks.map(said).find_map(|s| if let Said::Text(t) = s { Some(t) } else { None }) {
                 e.prompt = clip(&t, 200);
             }
         }
@@ -547,7 +578,14 @@ fn claude_meta(e: &mut Entry, line: &[u8], words: &mut Vec<u8>) {
                 if let Ok(v) = serde_json::from_slice::<Value>(line) {
                     let mut items = Vec::new();
                     claude_item(&v, &mut items, &mut HashMap::new(), false);
-                    absorb(e, &items, false);
+                    absorb_edits(e, items);
+                }
+            }
+        } else if !e.open.is_empty() && contains(line, br#""type":"tool_result""#) {
+            let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
+            if v["type"] == "user" {
+                for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
+                    settle(e, b["tool_use_id"].as_str().unwrap_or(""), b["is_error"] == true);
                 }
             }
         }
@@ -587,7 +625,15 @@ fn codex_meta(e: &mut Entry, line: &[u8], v2: bool, last: &mut Vec<u8>) {
         if let Ok(v) = serde_json::from_slice::<Value>(line) {
             let mut items = Vec::new();
             codex_line(&v, v2, &mut items, &mut HashMap::new(), false);
-            absorb(e, &items, v2);
+            // a v2 FileChange item is a finished edit; a patch's output is a line of its own
+            if v2 { absorb(e, &items, v2) } else { absorb_edits(e, items) }
+        }
+        return;
+    }
+    if !v2 && !e.open.is_empty() && contains(head, br#""type":"response_item""#) && contains(start, br#"_call_output""#) {
+        if let Ok(v) = serde_json::from_slice::<Value>(line) {
+            let p = &v["payload"];
+            settle(e, p["call_id"].as_str().unwrap_or(""), codex_exit_failed(&p["output"]));
         }
         return;
     }
@@ -736,7 +782,7 @@ pub fn parse_ts(s: &str) -> u64 {
         return 0;
     }
     let (y, m, d) = (n(0, 4), n(5, 2), n(8, 2));
-    let ms = if s.as_bytes()[19] == b'.' { n(20, 3) } else { 0 };
+    let ms = if s.as_bytes().get(19) == Some(&b'.') { n(20, 3) } else { 0 };
     // days from the civil date (Howard Hinnant's algorithm)
     let y2 = if m <= 2 { y - 1 } else { y };
     let era = y2.div_euclid(400);
@@ -1499,15 +1545,30 @@ fn is_narration(sig: &str) -> bool {
     field(&raw, 2).and_then(|f| field(f, 1)).and_then(|f| field(f, 8)) == Some(b"narration".as_slice())
 }
 
-// A command's exit status in a rollout without item events: the output text opens "Exit code: N" or is
-// JSON whose metadata holds exit_code. Anything else (no command, no status) did not fail.
+// A command's exit status in a rollout without item events, from the lines Codex puts before the output: "Exit
+// code: N" (shell), "Process exited with code N" after "Chunk ID:" and "Wall time:" (exec_command), or JSON whose
+// metadata holds exit_code. A patch Codex could not apply, a command that could not start and one the person
+// stopped say so in those lines instead. Anything else (no command, no status) did not fail.
 fn codex_exit_failed(output: &Value) -> bool {
+    const HEAD: [&str; 3] = ["Chunk ID:", "Wall time", "Original token count:"];
+    const FAILED: [&str; 3] = ["apply_patch verification failed", "execution error:", "aborted by user"];
     let Some(text) = output.as_str() else { return false };
     let text = text.trim_start();
-    if let Some(rest) = text.strip_prefix("Exit code:") {
-        return rest.trim_start().split(|c: char| !(c.is_ascii_digit() || c == '-')).next().and_then(|n| n.parse::<i64>().ok()).is_some_and(|n| n != 0);
+    if text.starts_with('{') {
+        return serde_json::from_str::<Value>(text).is_ok_and(|j| j["metadata"]["exit_code"].as_i64().is_some_and(|n| n != 0));
     }
-    text.starts_with('{') && serde_json::from_str::<Value>(text).is_ok_and(|j| j["metadata"]["exit_code"].as_i64().is_some_and(|n| n != 0))
+    for l in text.lines() {
+        if let Some(rest) = l.strip_prefix("Exit code:").or_else(|| l.strip_prefix("Process exited with code")) {
+            return rest.trim_start().split(|c: char| !(c.is_ascii_digit() || c == '-')).next().and_then(|n| n.parse::<i64>().ok()).is_some_and(|n| n != 0);
+        }
+        if FAILED.iter().any(|f| l.starts_with(f)) {
+            return true;
+        }
+        if !HEAD.iter().any(|h| l.starts_with(h)) {
+            break;
+        }
+    }
+    false
 }
 
 fn codex_item(v: &Value, items: &mut Vec<Value>, calls: &mut HashMap<String, usize>, media: bool) {
@@ -1736,7 +1797,8 @@ fn tool_item(name: &str, input: &Value, ts: u64) -> Value {
         "Agent" | "Task" => s("description"),
         "Skill" => s("skill"),
         "AskUserQuestion" => input["questions"][0]["question"].as_str().unwrap_or("").to_string(),
-        "exec_command" | "shell" => input["cmd"].as_str().map(str::to_string)
+        // shell_command (Codex's own shell tool) has its command as a string, which may run over several lines
+        "exec_command" | "shell" | "shell_command" => input["cmd"].as_str().or(input["command"].as_str()).map(str::to_string)
             .or_else(|| input["command"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")))
             .unwrap_or_default(),
         "apply_patch" => patch_files(&s("input")).iter().map(|f| short(f.0.clone())).collect::<Vec<_>>().join(", "),
@@ -2738,6 +2800,16 @@ mod tests {
         assert_eq!(it["summary"], "real");
     }
 
+    // Codex's shell_command with a command of several lines shows its first, as Bash does: it fell to the unknown
+    // tool's rule, which takes no value of several lines.
+    #[test]
+    fn a_codex_shell_command_of_several_lines_shows_its_first() {
+        let it = tool_item("shell_command", &json!({"command": "python - <<'EOF'\nprint(1)\nEOF", "workdir": "/w"}), 0);
+        assert_eq!(it["summary"], "python - <<'EOF'");
+        let it = tool_item("shell", &json!({"command": ["bash", "-lc", "ls"]}), 0);
+        assert_eq!(it["summary"], "bash -lc ls");
+    }
+
     // An unknown tool never shows a line of code as its summary: a naming field first, else a one-line value.
     #[test]
     fn unknown_tool_skips_code() {
@@ -2830,6 +2902,64 @@ mod tests {
             eprintln!("skipped: {} is not here", codex.display());
         }
         let _ = fs::remove_dir_all(&cache);
+    }
+
+    // A timestamp of whole seconds with no zone, 19 characters, read past its end: the panic, inside refresh, poisoned
+    // the history lock for every client.
+    #[test]
+    fn a_timestamp_of_whole_seconds_is_read() {
+        assert_eq!(parse_ts("2026-11-12T10:00:00"), parse_ts("2026-11-12T10:00:00.000Z"));
+        assert_eq!(parse_ts("2026-11-12T10:00:00.250Z") - parse_ts("2026-11-12T10:00:00Z"), 250);
+        assert_eq!(parse_ts("2026-11-12"), 0);
+    }
+
+    // A first message whose first block is injected context (an IDE's open file, a system reminder) still gives the
+    // row its prompt: only the first text block was looked at.
+    #[test]
+    fn the_prompt_is_found_past_injected_context() {
+        let mut e = Entry::new(Path::new("/x/eeee-5.jsonl"), "claude");
+        let line = json!({"parentUuid": null, "type": "user", "cwd": "/w", "timestamp": "2026-11-12T10:00:00.000Z",
+                          "message": {"role": "user", "content": [
+                              {"type": "text", "text": "<ide_opened_file>The user opened /w/login.rs</ide_opened_file>"},
+                              {"type": "text", "text": "<system-reminder>\nmind the tests\n</system-reminder>"},
+                              {"type": "text", "text": "fix the login bug"}]}});
+        claude_meta(&mut e, line.to_string().as_bytes(), &mut Vec::new());
+        assert_eq!(e.prompt, "fix the login bug");
+    }
+
+    // A folder removed, or made a repository, while the host runs shows on its row within a minute: the row's place
+    // was worked out once, and repo_root kept every answer for good.
+    #[test]
+    fn a_rows_folder_is_looked_at_again() {
+        let dir = scratch("placed");
+        let (wt, plain) = (dir.join("wt"), dir.join("plain"));
+        let git = |d: &Path| {
+            fs::create_dir_all(d.join(".git")).unwrap();
+            fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        };
+        git(&wt);
+        fs::create_dir_all(&plain).unwrap();
+        let placed = |cwd: &Path| {
+            let mut e = Entry::new(&dir.join("dddd-4.jsonl"), "claude");
+            e.id = "dddd-4".into();
+            e.cwd = cwd.to_string_lossy().into_owned();
+            e.placed();
+            e
+        };
+        let (mut gone, mut made) = (placed(&wt), placed(&plain));
+        assert!(gone.place.as_ref().is_some_and(|p| p.local && !p.root.is_empty()));
+        assert!(made.place.as_ref().is_some_and(|p| p.root.is_empty()));
+        fs::remove_dir_all(&wt).unwrap();
+        git(&plain);
+        for e in [&mut gone, &mut made] {
+            e.placed();
+            e.place.as_mut().unwrap().at -= PLACE_AGE;
+            e.placed();
+        }
+        let p = gone.place.as_ref().unwrap();
+        assert_eq!((p.local, p.root.as_str(), p.resume.as_str()), (false, "", "claude --resume dddd-4"));
+        assert_eq!(made.place.as_ref().unwrap().root, plain.to_string_lossy());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3114,6 +3244,17 @@ mod tests {
         assert_eq!(rows(json!(r#"{"output":"boom","metadata":{"exit_code":2,"duration_seconds":0.1}}"#)), json!(true));
         assert_eq!(rows(json!(r#"{"output":"ok","metadata":{"exit_code":0,"duration_seconds":0.1}}"#)), json!(false));
         assert_eq!(rows(json!("plain text, no status")), json!(false));
+        // exec_command's, a patch Codex could not apply, one that could not start, one the person stopped (codex-cli's
+        // rollouts on this machine)
+        assert_eq!(rows(json!("Chunk ID: 4f2a1c\nWall time: 1.0021 seconds\nProcess exited with code 1\nOriginal token count: 12\nOutput:\nboom")), json!(true));
+        assert_eq!(rows(json!("Chunk ID: 4f2a1c\nWall time: 1.0021 seconds\nProcess exited with code 0\nOutput:\nok")), json!(false));
+        assert_eq!(rows(json!("apply_patch verification failed: Failed to find expected lines in /w/a.rs:\nfn a() {}")), json!(true));
+        assert_eq!(rows(json!("execution error: Io(Error { kind: InvalidInput, message: \"nul byte found in provided data\" })")), json!(true));
+        assert_eq!(rows(json!("aborted by user after 10.8s")), json!(true));
+        assert_eq!(rows(json!("Wall time: 12.2 seconds\naborted by user")), json!(true));
+        // only Codex's own lines are read: the output's words are not a status
+        assert_eq!(rows(json!("Exit code: 0\nWall time: 0.2 seconds\nOutput:\nExit code: 3\naborted by user")), json!(false));
+        assert_eq!(rows(json!("Plan updated\naborted by user")), json!(false));
     }
 
     // A tool with no listed key has no detail: the first string of its input is an id as often as words.
@@ -3191,6 +3332,50 @@ mod tests {
         let got = changes(&file, "claude", None);
         let names: Vec<&str> = got["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["/x/kept.toml"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // A session's row counts an edit once its result is read, and not when it was refused or failed, as the Review
+    // panel does: the index counted each edit at its call, so a refused one stayed on the row as a changed file.
+    #[test]
+    fn a_rows_changes_leave_out_refused_edits() {
+        let dir = scratch("rowrefused");
+        let append = |f: &Path, line: String| {
+            let mut f = fs::OpenOptions::new().append(true).create(true).open(f).unwrap();
+            std::io::Write::write_all(&mut f, (line + "\n").as_bytes()).unwrap();
+        };
+        // Claude Code's lines, in its own key order
+        let file = dir.join("row-refused.jsonl");
+        let line = |kind: &str, block: Value| format!(r#"{{"parentUuid":null,"isSidechain":false,"type":"{kind}","message":{{"role":"{kind}","content":[{block}]}},"timestamp":"2026-10-25T00:00:00.000Z"}}"#);
+        let call = |id: &str, name: &str, input: Value| line("assistant", json!({"type": "tool_use", "id": id, "name": name, "input": input}));
+        let result = |id: &str, bad: bool| line("user", json!({"tool_use_id": id, "type": "tool_result", "content": "x", "is_error": bad}));
+        let edit = |f: &str| json!({"file_path": f, "old_string": "a", "new_string": "b\nc"});
+        for l in [call("e1", "Edit", edit("/x/kept.toml")), result("e1", false), call("e2", "Edit", edit("/x/denied.toml")), result("e2", true),
+                  call("w1", "Write", json!({"file_path": "/x/new.txt", "content": "one\ntwo"}))] {
+            append(&file, l);
+        }
+        let mut e = Entry::new(&file, "claude");
+        scan(&mut e);
+        assert_eq!((e.seen.clone(), e.add, e.del), (vec!["/x/kept.toml".to_string()], 2, 1));
+        // the Write's refusal comes with a later read, after the index was saved and read back
+        let mut e = Entry::restored(&e.saved()).unwrap();
+        append(&file, result("w1", true));
+        scan(&mut e);
+        assert_eq!((e.seen.clone(), e.add, e.del, e.open.len()), (vec!["/x/kept.toml".to_string()], 2, 1, 0));
+        // a Codex rollout without item events: a patch Codex could not apply, then one it applied
+        let file = dir.join("rollout-2026-10-25T00-00-00-019a0000-0000-7000-8000-00000000d001.jsonl");
+        let item = |payload: Value| format!(r#"{{"timestamp":"2026-10-25T00:00:00.000Z","type":"response_item","payload":{payload}}}"#);
+        let patch = |id: &str, body: &str| item(json!({"type": "custom_tool_call", "name": "apply_patch", "call_id": id,
+                                                        "input": format!("*** Begin Patch\n{body}\n*** End Patch")}));
+        let out = |id: &str, text: &str| item(json!({"type": "custom_tool_call_output", "call_id": id, "output": text}));
+        for l in [patch("p1", "*** Update File: /w/a.rs\n@@\n-old\n+new"), out("p1", "apply_patch verification failed: Failed to find expected lines in /w/a.rs:\nold"),
+                  patch("p2", "*** Add File: /w/b.rs\n+fn b() {}"),
+                  out("p2", r#"{"output":"Success. Updated the following files:\nA /w/b.rs\n","metadata":{"exit_code":0,"duration_seconds":0.0}}"#)] {
+            append(&file, l);
+        }
+        let mut e = Entry::new(&file, "codex");
+        scan(&mut e);
+        assert_eq!((e.seen.clone(), e.add, e.del), (vec!["/w/b.rs".to_string()], 1, 0));
         let _ = fs::remove_dir_all(&dir);
     }
 
